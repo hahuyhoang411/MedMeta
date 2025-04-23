@@ -17,16 +17,19 @@ def setup_retrieval_chain(
     device: str = 'cuda' # Allow device selection ('cuda' or 'cpu')
 ) -> Optional[ContextualCompressionRetriever]:
     """
-    Sets up the ensemble and compression retrieval chain (BM25 + FAISS + Reranker).
+    Sets up the retrieval chain based on the configuration.
+    Can use ensemble (BM25 + Dense), single Dense (FAISS), or single BM25,
+    followed by a reranker.
 
     Args:
         docs: List of LangChain Documents to index.
         config: Dictionary containing configuration parameters:
+            - RETRIEVER_MODE: 'ensemble', 'dense', or 'bm25'.
             - BGE_MODEL_NAME: Name of the BGE embedding model.
             - RERANKER_MODEL_NAME: Name of the CrossEncoder reranker model.
             - BM25_K: Number of documents for BM25 to retrieve.
-            - FAISS_K: Number of documents for FAISS to retrieve.
-            - ENSEMBLE_WEIGHTS: Weights for BM25 and FAISS in the ensemble.
+            - DENSE_RETRIEVER_K: Number of documents for the dense retriever (FAISS) to retrieve.
+            - ENSEMBLE_WEIGHTS: Weights for BM25 and Dense retriever (if mode is 'ensemble').
             - COMPRESSION_TOP_N: Number of documents to return after reranking.
         device: The device to run embedding and reranker models on ('cuda' or 'cpu').
 
@@ -37,46 +40,67 @@ def setup_retrieval_chain(
         logging.error("Cannot setup retriever chain: No documents provided.")
         return None
 
+    retriever_mode = config.get('RETRIEVER_MODE', 'ensemble').lower()
+    logging.info(f"Setting up retriever in mode: '{retriever_mode}'")
+
+    base_retriever = None
+    bm25_retriever = None
+    dense_retriever = None # Renamed from faiss_retriever
+
     try:
-        # 1. Initialize BM25 retriever
-        logging.info(f"Initializing BM25Retriever (k={config['BM25_K']})...")
-        bm25_retriever = BM25Retriever.from_documents(docs, k=config['BM25_K'])
-        logging.info("BM25Retriever initialized.")
+        # Initialize retrievers based on mode
+        if retriever_mode in ['ensemble', 'bm25']:
+            logging.info(f"Initializing BM25Retriever (k={config['BM25_K']})...")
+            bm25_retriever = BM25Retriever.from_documents(docs, k=config['BM25_K'])
+            logging.info("BM25Retriever initialized.")
+            if retriever_mode == 'bm25':
+                base_retriever = bm25_retriever
 
-        # 2. Initialize FAISS retriever with HuggingFace embeddings
-        logging.info(f"Initializing HuggingFaceBgeEmbeddings ({config['BGE_MODEL_NAME']}) on device '{device}'...")
-        embeddings = HuggingFaceBgeEmbeddings(
-            model_name=config['BGE_MODEL_NAME'],
-            model_kwargs={'device': device, 'trust_remote_code': True}, # Trust remote code for BGE models
-            encode_kwargs={'normalize_embeddings': True}, # Normalize for cosine similarity
-            query_instruction="search_query:", # Instructions for BGE M3/Mistral models
-            embed_instruction="search_document:"
-        )
-        logging.info("Embeddings model loaded. Initializing FAISS vector store...")
-        # Consider handling FAISS index saving/loading for large datasets
-        faiss_vectorstore = FAISS.from_documents(docs, embeddings)
-        faiss_retriever = faiss_vectorstore.as_retriever(search_kwargs={"k": config['FAISS_K']})
-        logging.info(f"FAISS vector store initialized and retriever created (k={config['FAISS_K']}).")
+        if retriever_mode in ['ensemble', 'dense']: # Changed from 'faiss'
+            logging.info(f"Initializing HuggingFaceBgeEmbeddings ({config['BGE_MODEL_NAME']}) on device '{device}'...")
+            embeddings = HuggingFaceBgeEmbeddings(
+                model_name=config['BGE_MODEL_NAME'],
+                model_kwargs={'device': device, 'trust_remote_code': True},
+                encode_kwargs={'normalize_embeddings': True},
+                query_instruction="search_query:",
+                embed_instruction="search_document:"
+            )
+            logging.info("Embeddings model loaded. Initializing FAISS vector store for Dense Retriever...")
+            # We still use FAISS as the backend, but refer to it as the dense retriever conceptually
+            faiss_vectorstore = FAISS.from_documents(docs, embeddings)
+            dense_retriever = faiss_vectorstore.as_retriever(search_kwargs={"k": config['DENSE_RETRIEVER_K']}) # Use new config key
+            logging.info(f"Dense Retriever (FAISS backend) initialized (k={config['DENSE_RETRIEVER_K']}).")
+            if retriever_mode == 'dense': # Changed from 'faiss'
+                base_retriever = dense_retriever
 
-        # 3. Initialize Ensemble Retriever
-        logging.info(f"Initializing EnsembleRetriever with weights {config['ENSEMBLE_WEIGHTS']}...")
-        ensemble_retriever = EnsembleRetriever(
-            retrievers=[bm25_retriever, faiss_retriever],
-            weights=config['ENSEMBLE_WEIGHTS']
-        )
-        logging.info("EnsembleRetriever initialized.")
+        # Setup Ensemble if mode is 'ensemble'
+        if retriever_mode == 'ensemble':
+            if not bm25_retriever or not dense_retriever: # Changed from faiss_retriever
+                 logging.error("Both BM25 and Dense retrievers are required for ensemble mode.")
+                 return None
+            logging.info(f"Initializing EnsembleRetriever with weights {config['ENSEMBLE_WEIGHTS']}...")
+            ensemble_retriever = EnsembleRetriever(
+                retrievers=[bm25_retriever, dense_retriever], # Changed from faiss_retriever
+                weights=config['ENSEMBLE_WEIGHTS']
+            )
+            logging.info("EnsembleRetriever initialized.")
+            base_retriever = ensemble_retriever
 
-        # 4. Initialize Contextual Compression Retriever with CrossEncoder reranker
+        if base_retriever is None:
+            logging.error(f"Invalid retriever mode '{retriever_mode}' or failed to initialize base retriever.")
+            return None
+
+        # 4. Initialize Contextual Compression Retriever with CrossEncoder reranker (applies to all modes)
         logging.info(f"Initializing CrossEncoder ({config['RERANKER_MODEL_NAME']}) on device '{device}'...")
         cross_encoder_model = HuggingFaceCrossEncoder(
             model_name=config['RERANKER_MODEL_NAME'],
-            model_kwargs={'device': device, 'trust_remote_code': True} # Trust remote code if necessary
+            model_kwargs={'device': device, 'trust_remote_code': True}
         )
         compressor = CrossEncoderReranker(model=cross_encoder_model, top_n=config['COMPRESSION_TOP_N'])
         logging.info(f"CrossEncoder loaded. Initializing ContextualCompressionRetriever (top_n={config['COMPRESSION_TOP_N']})...")
         compression_retriever = ContextualCompressionRetriever(
             base_compressor=compressor,
-            base_retriever=ensemble_retriever
+            base_retriever=base_retriever # Use the selected base retriever
         )
         logging.info("ContextualCompressionRetriever initialized successfully.")
         return compression_retriever

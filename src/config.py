@@ -40,11 +40,12 @@ LLM_MODEL_NAME = "gemini-2.5-flash-preview-04-17" # Updated model name
 
 # --- Retriever Settings ---
 RETRIEVER_CONFIG = {
+    "RETRIEVER_MODE": "ensemble", # Options: 'ensemble', 'dense', 'bm25'
     "BM25_K": 10,
-    "FAISS_K": 10,
-    "ENSEMBLE_WEIGHTS": [0.5, 0.5], # Weights for BM25 and FAISS
+    "DENSE_RETRIEVER_K": 10, # Renamed from FAISS_K
+    "ENSEMBLE_WEIGHTS": [0.5, 0.5], # Weights for BM25 and Dense Retriever (only used if RETRIEVER_MODE is 'ensemble')
     "COMPRESSION_TOP_N": 5, # Number of documents after reranking
-    "BGE_MODEL_NAME": BGE_MODEL_NAME, # Reference the variables above
+    "BGE_MODEL_NAME": BGE_MODEL_NAME,
     "RERANKER_MODEL_NAME": RERANKER_MODEL_NAME,
 }
 
