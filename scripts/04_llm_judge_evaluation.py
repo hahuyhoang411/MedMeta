@@ -6,8 +6,9 @@ import time
 import re
 import getpass
 import pandas as pd
+import numpy as np
 from tqdm import tqdm
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List, Dict, Any
 
 # Ensure the src directory is in the Python path
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -31,28 +32,65 @@ except ImportError:
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logging.getLogger("httpx").setLevel(logging.WARNING) # Reduce litellm verbosity
+logging.getLogger("litellm").setLevel(logging.WARNING) # Further reduce litellm verbosity
 
 # --- LLM Judge Configuration ---
-LLM_JUDGE_MODEL = "gemini/gemini-2.5-flash-preview-04-17" # Use model from config or default
-LLM_JUDGE_MAX_TOKENS = 32000 # Max tokens for the judge's response
-LLM_JUDGE_TEMPERATURE = 0.0 # Low temperature for consistent judging
-LLM_JUDGE_REASONING_EFFORT = "medium" # Or adjust as needed
+# Define multiple judges
+# NOTE: Ensure vLLM server is running and accessible at the specified api_base
+# NOTE: Update vllm_model_id path if necessary
+JUDGE_CONFIGS = [
+    {
+        "name": "Gemini-Flash",
+        "model": "gemini/gemini-1.5-flash-latest", # Use latest flash
+        "api_key_env_var": "GEMINI_API_KEY",
+        "max_tokens": 8192, # Adjust if needed
+        "temperature": 0.0,
+        "api_base": None # Not needed for Gemini API
+    },
+    # Add the vLLM judge based on user's example
+    {
+        "name": "Local-Qwen2.5-72B",
+        # Use the exact model ID reported by vLLM's /v1/models endpoint
+        "model": "hosted_vllm//home/jovyan/visual-thinker-workspace/models--Qwen--Qwen2.5-72B-Instruct/snapshots/495f39366efef23836d0cfae4fbe635880d2be31/",
+        "api_key": "NA", # No API key needed for local vLLM usually
+        "max_tokens": 8192, # As per user example
+        "temperature": 0.0, # Keep temperature low for consistency
+        "api_base": "http://localhost:8000/v1" # Base URL of vLLM server
+    },
+    # Add more judges here if needed
+    # {
+    #     "name": "Another-Model",
+    #     "model": "provider/model-name",
+    #     "api_key_env_var": "OTHER_API_KEY", # Or direct key
+    #     "max_tokens": 4096,
+    #     "temperature": 0.0,
+    #     "api_base": None # Or specify if needed
+    # }
+]
 
 # Output file for judged results
-JUDGED_EVALUATION_RESULTS_CSV_PATH = os.path.join(OUTPUT_DIR, "medmeta_evaluation_llm_judged.csv")
+JUDGED_EVALUATION_RESULTS_CSV_PATH = os.path.join(OUTPUT_DIR, "medmeta_evaluation_llm_multi_judged.csv") # Updated filename
 
 # --- Helper Functions ---
 
 def get_api_key(env_var="GEMINI_API_KEY"):
-    """Gets the API key, prompting if not found in environment variables."""
-    if env_var not in os.environ:
+    """Gets the API key from environment variables, prompting if necessary."""
+    # This function might need further generalization if many keys are needed,
+    # but for now, we fetch specific keys based on judge config.
+    api_key = os.environ.get(env_var)
+    if not api_key:
         logging.warning(f"{env_var} not found in environment variables.")
         try:
-            os.environ[env_var] = getpass.getpass(f"Enter your Google AI API key ({env_var}): ")
+            # Only prompt if it's interactive and key is missing
+            if sys.stdin.isatty():
+                 api_key = getpass.getpass(f"Enter your API key for {env_var}: ")
+                 os.environ[env_var] = api_key # Store for the session
+            else:
+                 logging.error(f"Cannot prompt for {env_var} in non-interactive mode.")
+                 return None
         except Exception as e:
-            logging.error(f"Could not get API key: {e}")
+            logging.error(f"Could not get API key for {env_var}: {e}")
             return None
-    api_key = os.environ.get(env_var)
     if not api_key:
         logging.error(f"API key ({env_var}) is missing or empty.")
         return None
@@ -84,22 +122,43 @@ def extract_score_and_reasoning(text: str) -> Tuple[Optional[int], Optional[str]
 
     return score, reasoning
 
-def get_llm_judgment(row: pd.Series, api_key: str) -> Tuple[Optional[int], Optional[str]]:
+# Modify get_llm_judgment to accept judge_config
+def get_llm_judgment(row: pd.Series, judge_config: Dict[str, Any]) -> Tuple[Optional[int], Optional[str]]:
     """
-    Sends data to the LLM judge and gets the score and reasoning.
+    Sends data to a specific LLM judge and gets the score and reasoning.
 
     Args:
         row: A pandas Series representing a row from the evaluation results.
-        api_key: The API key for the LLM provider.
+        judge_config: A dictionary containing the configuration for the judge LLM.
 
     Returns:
         A tuple containing the extracted score (int) and reasoning (str).
     """
     original_conclusion = row.get('Conclusion', 'N/A')
     generated_conclusion = row.get('Generated Conclusion', 'N/A')
+    judge_name = judge_config.get("name", "Unknown Judge")
 
-    # Define the system prompt for the LLM Judge
-    system_prompt = """Y## Persona & Objective
+    # --- Prepare API Call Parameters ---
+    model = judge_config.get("model")
+    if not model:
+        logging.error(f"[{judge_name}] Model name missing in judge configuration.")
+        return None, f"Error: Model name missing for judge {judge_name}"
+
+    api_key = judge_config.get("api_key") # Direct key if provided
+    if not api_key and "api_key_env_var" in judge_config:
+        # Fetch key from environment if env var name is specified
+        api_key = get_api_key(judge_config["api_key_env_var"])
+        if not api_key:
+             # If key fetch fails, log error and return
+             logging.error(f"[{judge_name}] Failed to get API key from {judge_config['api_key_env_var']}")
+             return None, f"Error: Missing API key for judge {judge_name}"
+
+    api_base = judge_config.get("api_base")
+    max_tokens = judge_config.get("max_tokens", 8192) # Default if not specified
+    temperature = judge_config.get("temperature", 0.0) # Default if not specified
+
+    # Define the system prompt (remains the same)
+    system_prompt = """## Persona & Objective
 You are an expert **Clinical Research Scientist and Critical Appraiser** specializing in meta-analysis methodology and scientific communication. Your objective is to rigorously evaluate the quality and semantic similarity of a conclusion generated by an Agentic RAG system (designed to automate meta-analysis) against the original conclusion from a published, peer-reviewed meta-analysis.
 
 ## Input Data
@@ -194,43 +253,53 @@ Score: [Your score from 0-5]
         {"role": "user", "content": user_content},
     ]
 
+    logging.info(f"[{judge_name}] Calling model: {model}" + (f" via {api_base}" if api_base else ""))
     try:
         response = completion(
-            model=LLM_JUDGE_MODEL,
+            model=model,
             messages=messages,
-            api_key=api_key, # Pass the key directly
-            max_tokens=LLM_JUDGE_MAX_TOKENS,
-            temperature=LLM_JUDGE_TEMPERATURE,
-            # reasoning_effort=LLM_JUDGE_REASONING_EFFORT # Optional parameter
+            api_key=api_key,
+            api_base=api_base,
+            max_tokens=max_tokens,
+            temperature=temperature,
         )
-        response_text = response.choices[0].message.content
-        logging.debug(f"LLM Judge Response: {response_text}")
-        return extract_score_and_reasoning(response_text)
+        # Handle potential differences in response structure if necessary
+        if response and response.choices and response.choices[0].message:
+             response_text = response.choices[0].message.content
+             logging.debug(f"[{judge_name}] Raw Response: {response_text[:200]}...")
+             score, reasoning = extract_score_and_reasoning(response_text)
+             # Add judge name to reasoning for clarity
+             reasoning_with_judge = f"[{judge_name}] {reasoning}"
+             return score, reasoning_with_judge
+        else:
+             logging.error(f"[{judge_name}] Received invalid or empty response object: {response}")
+             return None, f"[{judge_name}] Error: Invalid response object"
+
 
     except Exception as e:
-        logging.error(f"Error calling LLM judge for conclusion '{original_conclusion[:50]}...': {e}", exc_info=True)
-        return None, f"Error during LLM call: {type(e).__name__}"
+        logging.error(f"[{judge_name}] Error calling LLM judge for conclusion '{original_conclusion[:50]}...': {e}", exc_info=False) # Set exc_info=False for less verbose logs unless debugging
+        # Optionally log traceback if needed: logging.exception(f"...")
+        return None, f"[{judge_name}] Error during LLM call: {type(e).__name__}"
 
 
 # --- Main Function ---
 
 def main(input_file: str, output_file: str, max_rows: Optional[int], wait_time: int):
     """
-    Main function to load evaluation results, get LLM judgments, and save.
+    Main function to load evaluation results, get LLM judgments from multiple judges,
+    calculate mean scores, and save.
 
     Args:
         input_file: Path to the evaluation results CSV from script 03.
         output_file: Path to save the LLM-judged evaluation results CSV.
         max_rows: Maximum number of rows to process (None for all).
-        wait_time: Seconds to wait between LLM calls (for rate limits).
+        wait_time: Seconds to wait between LLM calls *for each judge* (for rate limits).
     """
     judge_start_time = time.time()
 
-    # --- Get API Key ---
-    api_key = get_api_key() # Uses GEMINI_API_KEY by default
-    if not api_key:
-        logging.error("Cannot proceed without API key. Exiting.")
-        return
+    # --- Pre-fetch API Keys if needed (optional optimization) ---
+    # You could pre-fetch keys here to avoid doing it in the loop,
+    # especially if prompting is required. For now, get_api_key handles it.
 
     # --- Load Evaluation Data ---
     logging.info(f"Loading evaluation results from: {input_file}")
@@ -253,63 +322,125 @@ def main(input_file: str, output_file: str, max_rows: Optional[int], wait_time: 
          return
 
     num_rows_to_process = len(df_eval)
-    llm_scores = []
-    llm_reasonings = []
+    # Store aggregated results per row
+    aggregated_scores = []
+    aggregated_reasonings = []
+    # Store individual judge results per row (optional, for detailed analysis)
+    individual_judge_results: Dict[str, List[Optional[Any]]] = {f"{cfg['name']}_Score": [] for cfg in JUDGE_CONFIGS}
+    individual_judge_results.update({f"{cfg['name']}_Reasoning": [] for cfg in JUDGE_CONFIGS})
+
 
     # --- Process Each Row ---
-    logging.info(f"Starting LLM judgment loop for {num_rows_to_process} rows...")
+    logging.info(f"Starting LLM judgment loop for {num_rows_to_process} rows using {len(JUDGE_CONFIGS)} judges...")
     for index, row in tqdm(df_eval.iterrows(), total=num_rows_to_process, desc="Judging Rows"):
         start_row_time = time.time()
         original_number = row.get('Number', f'Index_{index}') # For logging
 
         logging.info(f"\n--- Judging Row {index+1}/{num_rows_to_process} (Number: {original_number}) ---")
 
+        row_scores = []
+        row_reasonings = []
+
         # Skip rows where the original conclusion was skipped or errored
         if str(row.get('Generated Conclusion', '')).startswith('Skipped') or \
            str(row.get('Generated Conclusion', '')).startswith('Error'):
             logging.warning(f"Skipping LLM judgment for row {index+1} due to previous skip/error.")
-            score, reasoning = None, "Skipped - Prior Error/Skip"
-        else:
-            score, reasoning = get_llm_judgment(row, api_key)
+            # Append Nones for all judges for this row
+            mean_score = None
+            combined_reasoning = "Skipped - Prior Error/Skip"
+            for cfg in JUDGE_CONFIGS:
+                 row_scores.append(None)
+                 row_reasonings.append(f"[{cfg['name']}] Skipped - Prior Error/Skip")
+                 individual_judge_results[f"{cfg['name']}_Score"].append(None)
+                 individual_judge_results[f"{cfg['name']}_Reasoning"].append("Skipped - Prior Error/Skip")
 
-        llm_scores.append(score)
-        llm_reasonings.append(reasoning)
+        else:
+            # --- Inner loop for judges ---
+            for judge_idx, judge_config in enumerate(JUDGE_CONFIGS):
+                judge_name = judge_config.get("name", f"Judge_{judge_idx}")
+                logging.info(f"--- Calling Judge {judge_idx+1}/{len(JUDGE_CONFIGS)}: {judge_name} ---")
+
+                score, reasoning = get_llm_judgment(row, judge_config)
+
+                row_scores.append(score)
+                row_reasonings.append(reasoning)
+                individual_judge_results[f"{judge_name}_Score"].append(score)
+                individual_judge_results[f"{judge_name}_Reasoning"].append(reasoning)
+
+
+                logging.info(f"Judge {judge_name} finished. Score: {score}")
+
+                # Wait between judge calls if needed (adjust wait_time logic if necessary)
+                if wait_time > 0 and judge_idx < len(JUDGE_CONFIGS) - 1:
+                    logging.info(f"Waiting {wait_time}s before next judge...")
+                    time.sleep(wait_time)
+            # --- End of judges loop ---
+
+            # Calculate mean score for the row, ignoring None values
+            valid_scores = [s for s in row_scores if s is not None]
+            mean_score = np.mean(valid_scores) if valid_scores else None
+
+            # Combine reasonings (simple join)
+            combined_reasoning = "\n---\n".join(str(r) for r in row_reasonings if r is not None)
+
+
+        aggregated_scores.append(mean_score)
+        aggregated_reasonings.append(combined_reasoning)
 
         end_row_time = time.time()
-        logging.info(f"Row {index+1} judged in {end_row_time - start_row_time:.2f} seconds. Score: {score}")
+        logging.info(f"Row {index+1} judged by all judges in {end_row_time - start_row_time:.2f} seconds. Mean Score: {mean_score if mean_score is not None else 'N/A'}")
 
-        # Wait between rows if it's not the last row
-        if wait_time > 0 and index < num_rows_to_process - 1:
-            logging.info(f"Waiting for {wait_time} seconds before next row...")
-            time.sleep(wait_time)
+        # Optional: Wait between rows (if judges have shared rate limits or to reduce load)
+        # if wait_time > 0 and index < num_rows_to_process - 1:
+        #     logging.info(f"Waiting for {wait_time} seconds before next row...")
+        #     time.sleep(wait_time)
 
     # --- Add results and Save ---
     logging.info("LLM judgment loop finished.")
-    df_eval['LLM Judge Score'] = llm_scores
-    df_eval['LLM Judge Reasoning'] = llm_reasonings
+    df_eval['Mean LLM Judge Score'] = aggregated_scores
+    df_eval['Combined LLM Judge Reasoning'] = aggregated_reasonings
 
-    logging.info(f"Saving LLM-judged evaluation results to {output_file}...")
+    # Add individual judge results to the DataFrame
+    for col_name, results_list in individual_judge_results.items():
+         # Ensure list length matches DataFrame length (important if max_rows was used)
+         if len(results_list) == len(df_eval):
+              df_eval[col_name] = results_list
+         else:
+              logging.error(f"Length mismatch for column {col_name}. Expected {len(df_eval)}, got {len(results_list)}. Skipping column.")
+
+
+    logging.info(f"Saving multi-judged evaluation results to {output_file}...")
     try:
         # Ensure output directory exists
         os.makedirs(os.path.dirname(output_file), exist_ok=True)
         df_eval.to_csv(output_file, index=False, encoding='utf-8')
-        logging.info("LLM-judged evaluation results saved successfully.")
+        logging.info("Multi-judged evaluation results saved successfully.")
 
         # Display summary
-        print("\n--- LLM Judgment Summary ---")
-        print(df_eval['LLM Judge Score'].value_counts(dropna=False).sort_index())
-        avg_score = df_eval['LLM Judge Score'].mean()
-        print(f"\nAverage LLM Judge Score: {avg_score:.2f}" if not pd.isna(avg_score) else "Average LLM Judge Score: N/A")
+        print("\n--- LLM Multi-Judgment Summary ---")
+        print("Mean Score Distribution:")
+        print(df_eval['Mean LLM Judge Score'].value_counts(dropna=False).sort_index())
+        overall_avg_score = df_eval['Mean LLM Judge Score'].mean()
+        print(f"\nOverall Average of Mean Scores: {overall_avg_score:.2f}" if not pd.isna(overall_avg_score) else "Overall Average of Mean Scores: N/A")
+
+        # Print average score per judge
+        print("\nAverage Score Per Judge:")
+        for cfg in JUDGE_CONFIGS:
+             judge_score_col = f"{cfg['name']}_Score"
+             if judge_score_col in df_eval:
+                  avg_judge_score = df_eval[judge_score_col].mean()
+                  print(f"  - {cfg['name']}: {avg_judge_score:.2f}" if not pd.isna(avg_judge_score) else f"  - {cfg['name']}: N/A")
+
 
     except Exception as e:
         logging.error(f"Failed to save judged evaluation results: {e}", exc_info=True)
 
     judge_end_time = time.time()
-    logging.info(f"Total LLM judgment script execution time: {judge_end_time - judge_start_time:.2f} seconds.")
+    logging.info(f"Total LLM multi-judgment script execution time: {judge_end_time - judge_start_time:.2f} seconds.")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Evaluate RAG conclusions using an LLM judge.")
+    parser = argparse.ArgumentParser(description="Evaluate RAG conclusions using multiple LLM judges.")
     parser.add_argument(
         "--input_file",
         default=EVALUATION_RESULTS_CSV_PATH,
@@ -317,8 +448,8 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--output_file",
-        default=JUDGED_EVALUATION_RESULTS_CSV_PATH,
-        help=f"Path to save the output CSV with LLM judgments (default: {JUDGED_EVALUATION_RESULTS_CSV_PATH})."
+        default=JUDGED_EVALUATION_RESULTS_CSV_PATH, # Use updated default
+        help=f"Path to save the output CSV with multi-judge results (default: {JUDGED_EVALUATION_RESULTS_CSV_PATH})."
     )
     parser.add_argument(
         "--max_rows",
@@ -329,9 +460,10 @@ if __name__ == "__main__":
     parser.add_argument(
         "--wait_time",
         type=int,
-        default=5, # Default wait time between API calls
-        help="Seconds to wait between LLM API calls (adjust for rate limits)."
+        default=2, # Reduced default wait time between *judge* calls
+        help="Seconds to wait between LLM API calls for each judge (adjust for rate limits)."
     )
+
 
     args = parser.parse_args()
 
@@ -343,5 +475,4 @@ if __name__ == "__main__":
     )
 
     # Example usage from command line:
-    # python scripts/04_llm_judge_evaluation.py
-    # python scripts/04_llm_judge_evaluation.py --input_file ./output/medmeta_evaluation_results.csv --output_file ./output/judged_results.csv --max_rows 10 --wait_time 2
+    # python scripts/04_llm_judge_evaluation.py --input_file ../output/hybrid.csv --output_file ../output/judged_results.csv --max_rows 20 --wait_time 30
