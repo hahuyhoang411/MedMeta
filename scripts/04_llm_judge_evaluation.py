@@ -370,10 +370,17 @@ def main(input_file: str, output_file: str, max_rows: Optional[int], wait_time: 
 
                 logging.info(f"Judge {judge_name} finished. Score: {score}")
 
-                # Wait between judge calls if needed (adjust wait_time logic if necessary)
-                if wait_time > 0 and judge_idx < len(JUDGE_CONFIGS) - 1:
-                    logging.info(f"Waiting {wait_time}s before next judge...")
-                    time.sleep(wait_time)
+                # Wait between judge calls ONLY if the NEXT judge is API-based (no api_base)
+                is_last_judge = (judge_idx == len(JUDGE_CONFIGS) - 1)
+                if wait_time > 0 and not is_last_judge:
+                    next_judge_config = JUDGE_CONFIGS[judge_idx + 1]
+                    next_judge_is_local = next_judge_config.get("api_base") is not None
+                    if not next_judge_is_local:
+                        logging.info(f"Waiting {wait_time}s before next judge (API call)...")
+                        time.sleep(wait_time)
+                    else:
+                         logging.debug(f"Skipping wait time, next judge '{next_judge_config.get('name')}' is local.")
+
             # --- End of judges loop ---
 
             # Calculate mean score for the row, ignoring None values
