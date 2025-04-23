@@ -35,8 +35,8 @@ logging.getLogger("httpx").setLevel(logging.WARNING) # Reduce litellm verbosity
 # --- LLM Judge Configuration ---
 LLM_JUDGE_MODEL = "gemini/gemini-2.5-flash-preview-04-17" # Use model from config or default
 LLM_JUDGE_MAX_TOKENS = 32000 # Max tokens for the judge's response
-LLM_JUDGE_TEMPERATURE = 0.1 # Low temperature for consistent judging
-LLM_JUDGE_REASONING_EFFORT = "low" # Or adjust as needed
+LLM_JUDGE_TEMPERATURE = 0.0 # Low temperature for consistent judging
+LLM_JUDGE_REASONING_EFFORT = "medium" # Or adjust as needed
 
 # Output file for judged results
 JUDGED_EVALUATION_RESULTS_CSV_PATH = os.path.join(OUTPUT_DIR, "medmeta_evaluation_llm_judged.csv")
