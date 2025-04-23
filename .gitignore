@@ -102,7 +102,7 @@ venv.bak/
 # Outputs and Cache specific to this project
 output/
 .cache/
-# *.csv
+*.csv
 
 # Data files (if large or private, otherwise keep if small like MedMeta.csv)
 # data/ # Uncomment if you don't want to track data files
