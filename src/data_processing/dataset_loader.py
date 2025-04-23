@@ -85,7 +85,7 @@ def load_and_process_pubmed25(
         logging.info("Filtering dataset for non-empty abstracts and English language...")
         filtered_dataset = dataset.filter(
             filter_abstract_and_language,
-            batched=True, # Process in batches for efficiency
+            # batched=True, # Process in batches for efficiency
             num_proc=num_proc
         )
         logging.info(f"Filtered dataset size: {len(filtered_dataset)}")
