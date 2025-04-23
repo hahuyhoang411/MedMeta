@@ -129,7 +129,7 @@ def synthesize_conclusion(state: MetaAnalysisState, llm: BaseChatModel) -> Dict[
 
 
     prompt = ChatPromptTemplate.from_messages([
-        ("system", "You are a research analyst summarizing findings for a meta-analysis or systematic review. Based *only* on the provided context from retrieved studies, synthesize a concise conclusion addressing the key research questions outlined in the plan (if available). Identify major themes, consistent findings, discrepancies, or gaps mentioned across the studies. Do not add external knowledge. Focus on summarizing the evidence presented."),
+        ("system", "You are a research analyst tasked with creating the final concluding summary for a meta-analysis or systematic review. Based *only* on the provided context from retrieved studies, synthesize a concise wrap-up conclusion. This conclusion should address the key research questions (if available), identify major themes, consistent findings, discrepancies, or gaps mentioned across the studies. Frame your response as a final summary of the evidence presented in the context. Do not add external knowledge."),
         ("human", "Research Topic: {topic}\n\nResearch Plan Key Questions:\n{key_questions}\n\nRetrieved Study Context:\n{context}\n\nSynthesize a concise conclusion based *only* on the provided context:")
     ])
 
