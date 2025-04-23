@@ -58,6 +58,7 @@ LLM_CONFIG = {
 }
 
 # --- Data Processing Settings ---
+DEFAULT_PMID_COLUMN = 'References' 
 PUBMED25_DATASET_NAME = "HoangHa/pubmed25"
 PUBMED25_SPLIT = "train"
 PUBMED25_SUBSET_SIZE = 10000 # Number of records to take from pubmed25 for the RAG dataset
