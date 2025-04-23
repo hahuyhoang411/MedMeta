@@ -41,7 +41,7 @@ logging.getLogger("litellm").setLevel(logging.WARNING) # Further reduce litellm 
 JUDGE_CONFIGS = [
     {
         "name": "Gemini-Flash",
-        "model": "gemini/gemini-1.5-flash-latest", # Use latest flash
+        "model": "gemini/gemini-2.5-flash-preview-04-17", # Use latest flash
         "api_key_env_var": "GEMINI_API_KEY",
         "max_tokens": 8192, # Adjust if needed
         "temperature": 0.0,
