@@ -3,7 +3,7 @@ from typing import List, Dict, Any, Optional
 
 from langchain_core.documents import Document
 from langchain_community.retrievers import BM25Retriever
-from langchain_community.embeddings import HuggingFaceBgeEmbeddings
+from langchain_huggingface import HuggingFaceBgeEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain.retrievers import EnsembleRetriever, ContextualCompressionRetriever
 from langchain.retrievers.document_compressors import CrossEncoderReranker
