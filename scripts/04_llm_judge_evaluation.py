@@ -33,7 +33,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logging.getLogger("httpx").setLevel(logging.WARNING) # Reduce litellm verbosity
 
 # --- LLM Judge Configuration ---
-LLM_JUDGE_MODEL = "gemini-2.5-pro-preview-03-25" # Use model from config or default
+LLM_JUDGE_MODEL = "gemini/gemini-2.5-flash-preview-04-17" # Use model from config or default
 LLM_JUDGE_MAX_TOKENS = 32000 # Max tokens for the judge's response
 LLM_JUDGE_TEMPERATURE = 0.1 # Low temperature for consistent judging
 LLM_JUDGE_REASONING_EFFORT = "low" # Or adjust as needed
