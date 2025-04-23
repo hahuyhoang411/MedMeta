@@ -7,44 +7,16 @@ from datasets import load_dataset, concatenate_datasets, Dataset, Features, Valu
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-def filter_abstract_and_language(batch: Dict[str, List]) -> List[bool]:
-    """
-    Filter function for Hugging Face datasets. Keeps entries with non-empty abstracts
-    and language set to 'eng'.
+def filter_abstract_and_language(batch):
+    # Access the relevant lists from the batch
+    abstract_texts = batch['MedlineCitation']['Article']['Abstract']['AbstractText']
+    languages = batch['MedlineCitation']['Article']['Language']
 
-    Args:
-        batch: A dictionary representing a batch of dataset rows.
-
-    Returns:
-        A list of booleans indicating which rows to keep.
-    """
-    keep_mask = []
-    # Ensure keys exist and are lists before iterating
-    abstract_texts = batch.get('MedlineCitation', {}).get('Article', {}).get('Abstract', {}).get('AbstractText', [])
-    languages = batch.get('MedlineCitation', {}).get('Article', {}).get('Language', [])
-
-    # Handle cases where list lengths might mismatch if data is inconsistent
-    batch_size = len(batch.get('PMID', [])) # Use a reliable key for batch size
-    if not isinstance(abstract_texts, list): abstract_texts = [abstract_texts] * batch_size
-    if not isinstance(languages, list): languages = [languages] * batch_size
-
-    min_len = min(len(abstract_texts), len(languages), batch_size)
-    if len(abstract_texts) != batch_size or len(languages) != batch_size:
-        logging.warning(f"Inconsistent list lengths in batch. Using min length: {min_len}")
-
-
-    for i in range(min_len):
-        # Safely access elements
-        text = abstract_texts[i] if i < len(abstract_texts) else None
-        lang = languages[i] if i < len(languages) else None
-
-        # Check conditions
-        is_valid = (text is not None and text != '') and (lang == 'eng')
-        keep_mask.append(is_valid)
-
-    # Pad mask if lengths were inconsistent
-    keep_mask.extend([False] * (batch_size - min_len))
-
+    # Create a list of booleans: True if abstract is non-empty AND language is 'eng'
+    keep_mask = [
+        (text is not None and text != '') and (lang == 'eng')
+        for text, lang in zip(abstract_texts, languages)
+    ]
     return keep_mask
 
 def transform_pubmed25_entry(example: Dict) -> Dict:
