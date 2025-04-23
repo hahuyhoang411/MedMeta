@@ -48,7 +48,7 @@ def generate_search_queries(state: MetaAnalysisState, llm: BaseChatModel) -> Dic
     plan_context = f"Background: {plan.background}\nKey Questions:\n" + "\n".join(f"- {q}" for q in plan.key_questions) + f"\nSearch Strategy Summary: {plan.search_strategy_summary}"
 
     prompt = ChatPromptTemplate.from_messages([
-        ("system", "You are an expert in creating search queries for biomedical literature databases like PubMed. Based on the provided research plan, generate a list of 5 optimized search queries. Focus on keywords, concepts, potential MeSH terms (if applicable), and use effective keyword-focused terms for BM25 retrieval systems appropriately to capture relevant studies for the key questions."),
+        ("system", "You are an expert in creating search queries for biomedical literature databases like PubMed, optimized for modern retrieval systems (BM25 keyword search and dense vector search). Based on the provided research plan, generate a list of 5 effective search queries. Focus on extracting key concepts, relevant keywords, and potential synonyms. **Do NOT use boolean operators (AND, OR, NOT)** as the retrieval system handles term weighting. Aim for queries that capture the core topics for both keyword relevance and semantic similarity."),
         ("human", "Generate 5 search queries based on this research plan:\n\n{plan_context}")
     ])
 
