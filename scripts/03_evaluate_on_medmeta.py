@@ -209,10 +209,14 @@ def main(eval_file: str, output_file: str, max_rows: Optional[int], wait_time: i
         logging.info(f"Query: {query}")
 
         generated_conclusion = "Skipped"
+        # Initialize variables before the try block to ensure they exist
+        ordered_retrieved_pmids: List[int] = []
         retrieved_docs_list = []
         missing_pmids_list: List[int] = []
         target_pmids: Set[int] = set()
         final_state: Optional[Dict[str, Any]] = None
+        hit_at_k: int = 0 # Initialize metric
+        ap_at_k: float = 0.0 # Initialize metric
 
 
         if not query or pd.isna(query):
@@ -232,15 +236,15 @@ def main(eval_file: str, output_file: str, max_rows: Optional[int], wait_time: i
                 if final_state:
                     generated_conclusion = final_state.get('final_conclusion', "Conclusion not found in RAG output")
                     # Extract retrieved docs - handle potential variation in state structure
-                    retrieved_docs_list = final_state.get('retrieved_docs', [])
+                    retrieved_docs_list = final_state.get('retrieved_docs', []) # Assign here
 
                     logging.info(f"Retrieved {len(retrieved_docs_list)} documents.")
 
-                    # Get ORDERED retrieved PMIDs
+                    # Get ORDERED retrieved PMIDs - Assign here
                     ordered_retrieved_pmids = get_ordered_retrieved_pmids(retrieved_docs_list)
                     logging.info(f"Retrieved PMIDs (ordered): {ordered_retrieved_pmids if ordered_retrieved_pmids else 'None'}")
 
-                    # Calculate metrics
+                    # Calculate metrics - Assign here
                     hit_at_k = calculate_hit_at_k(ordered_retrieved_pmids, target_pmids, k_value)
                     ap_at_k = calculate_average_precision_at_k(ordered_retrieved_pmids, target_pmids, k_value)
                     all_hit_at_k.append(hit_at_k)
@@ -249,7 +253,8 @@ def main(eval_file: str, output_file: str, max_rows: Optional[int], wait_time: i
 
 
                     if target_pmids:
-                        missing_pmids_set = target_pmids - set(ordered_retrieved_pmids) # Can still calculate missing based on set
+                        # Fix TypeError: Convert list to set for difference operation
+                        missing_pmids_set = target_pmids - set(ordered_retrieved_pmids)
                         missing_pmids_list = sorted(list(missing_pmids_set))
                     # else: missing_pmids_list = [] # Already initialized
 
@@ -258,15 +263,19 @@ def main(eval_file: str, output_file: str, max_rows: Optional[int], wait_time: i
                 else:
                      generated_conclusion = "Error: RAG invocation returned None"
                      logging.error("RAG invocation returned None state.")
+                     # Ensure missing PMIDs are calculated even if final_state is None but target_pmids exist
+                     missing_pmids_list = sorted(list(target_pmids)) if target_pmids else []
+
 
             except Exception as e:
                 logging.error(f"Error during RAG invocation or processing for row index {index} (Number: {original_number}): {e}", exc_info=True)
                 generated_conclusion = f"Error: {type(e).__name__}" # Store error type
                 # If error, assume all target PMIDs are missing
                 missing_pmids_list = sorted(list(target_pmids)) if target_pmids else []
+                # Metrics remain at their initialized values (0, 0.0)
 
 
-        # Store results
+        # Store results - Now ordered_retrieved_pmids, hit_at_k, ap_at_k are guaranteed to exist
         result_row = {
             **row_dict, # Include original columns
             'Generated Conclusion': generated_conclusion,
