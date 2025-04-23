@@ -208,7 +208,7 @@ Score: [Your score from 0-5]
         return extract_score_and_reasoning(response_text)
 
     except Exception as e:
-        logging.error(f"Error calling LLM judge for query '{query[:50]}...': {e}", exc_info=True)
+        logging.error(f"Error calling LLM judge for conclusion '{original_conclusion[:50]}...': {e}", exc_info=True)
         return None, f"Error during LLM call: {type(e).__name__}"
 
 
