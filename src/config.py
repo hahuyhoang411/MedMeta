@@ -51,10 +51,17 @@ RETRIEVER_CONFIG = {
 
 # --- LLM Settings ---
 LLM_CONFIG = {
-    "LLM_MODEL_NAME": LLM_MODEL_NAME,
+    "LLM_PROVIDER": "google", # Or "openai"
+    "LLM_MODEL_NAME": "gemini-2.5-flash-preview-04-17", # Or "gpt-4o-mini" etc.
     "LLM_TEMPERATURE": 0.0,
-    "LLM_MAX_TOKENS": 32000, # Adjust based on model limits and needs
-    "GOOGLE_API_KEY_ENV_VAR": GOOGLE_API_KEY_ENV_VAR,
+    "LLM_MAX_TOKENS": 32000, # Let the provider handle default or set specific value
+    "GOOGLE_API_KEY_ENV_VAR": "GOOGLE_API_KEY", # Keep for Google option
+    "OPENAI_API_KEY_ENV_VAR": "OPENAI_API_KEY", # Add for OpenAI option
+    # Optional OpenAI specific params (add if needed)
+    # "OPENAI_BASE_URL": None,
+    # "OPENAI_ORGANIZATION": None,
+    # "OPENAI_MAX_RETRIES": 2,
+    # "OPENAI_TIMEOUT": None,
 }
 
 # --- Data Processing Settings ---
