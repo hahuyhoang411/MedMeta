@@ -3,7 +3,7 @@ from typing import List, Dict, Any, Optional
 
 from langchain_core.documents import Document
 from langchain_community.retrievers import BM25Retriever
-from langchain_huggingface import HuggingFaceBgeEmbeddings
+from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain.retrievers import EnsembleRetriever, ContextualCompressionRetriever
 from langchain.retrievers.document_compressors import CrossEncoderReranker
@@ -57,8 +57,8 @@ def setup_retrieval_chain(
                 base_retriever = bm25_retriever
 
         if retriever_mode in ['ensemble', 'dense']: # Changed from 'faiss'
-            logging.info(f"Initializing HuggingFaceBgeEmbeddings ({config['BGE_MODEL_NAME']}) on device '{device}'...")
-            embeddings = HuggingFaceBgeEmbeddings(
+            logging.info(f"Initializing HuggingFaceEmbeddings ({config['BGE_MODEL_NAME']}) on device '{device}'...")
+            embeddings = HuggingFaceEmbeddings(
                 model_name=config['BGE_MODEL_NAME'],
                 model_kwargs={'device': device, 'trust_remote_code': True},
                 encode_kwargs={'normalize_embeddings': True},
