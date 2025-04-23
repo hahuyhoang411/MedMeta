@@ -177,4 +177,4 @@ if __name__ == "__main__":
 
     # Example usage from command line:
     # python scripts/01_fetch_pubmed_data.py
-    # python scripts/01_fetch_pubmed_data.py --input_csv ./data/MedMeta.csv --pmid_column PubMed_ID --output ./output/pubmed_data_final.csv --use-api-key
+    # python scripts/01_fetch_pubmed_data.py --input_csv ./data/MedMeta.csv --pmid_column References --output ./output/pubmed_data_final.csv --use-api-key

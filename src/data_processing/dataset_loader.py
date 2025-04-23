@@ -162,7 +162,6 @@ def load_local_csv_dataset(file_path: str, split: str = 'train') -> Optional[Dat
         # Ensure columns are read as strings to avoid type issues later
         dataset = load_dataset('csv', data_files=file_path, split=split,
                                 column_names=['PMID', 'Year', 'text'], # Define column names if no header
-                                dtype={'PMID': 'string', 'Year': 'string', 'text': 'string'},
                                 keep_in_memory=True) # Keep small ref dataset in memory
         logging.info(f"Successfully loaded CSV dataset with {len(dataset)} rows.")
         # Validate columns - datasets automatically handles this if column_names is set
