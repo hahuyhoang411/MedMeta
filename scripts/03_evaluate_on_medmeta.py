@@ -512,7 +512,7 @@ def main(eval_file: str, output_file: str, max_rows: Optional[int], wait_time: i
 
                     logging.info(f"Retrieved {len(retrieved_docs_list)} documents.")
 
-                    retrieved_pmids_set = get_retrieved_pmids(retrieved_docs_list)
+                    retrieved_pmids_set = get_ordered_retrieved_pmids(retrieved_docs_list)
                     logging.info(f"Retrieved PMIDs (parsed): {retrieved_pmids_set if retrieved_pmids_set else 'None'}")
 
                     if target_pmids:
@@ -537,12 +537,14 @@ def main(eval_file: str, output_file: str, max_rows: Optional[int], wait_time: i
         result_row = {
             **row_dict, # Include original columns
             'Generated Conclusion': generated_conclusion,
-            'Retrieved PMIDs': sorted(list(get_retrieved_pmids(retrieved_docs_list))), # Store retrieved PMIDs as sorted list
-            'Target PMIDs': sorted(list(target_pmids)), # Store target PMIDs as sorted list
+            'Retrieved PMIDs Ordered': ordered_retrieved_pmids,
+            'Target PMIDs': sorted(list(target_pmids)),
             'Missing PMIDs': missing_pmids_list,
-            'Num Retrieved': len(retrieved_docs_list),
+            'Num Retrieved': len(ordered_retrieved_pmids),
             'Num Target': len(target_pmids),
-            'Num Missing': len(missing_pmids_list)
+            'Num Missing': len(missing_pmids_list),
+            f'Hit@{k_value}': hit_at_k,
+            f'AP@{k_value}': ap_at_k,
         }
         # Optionally add details from final_state if needed (e.g., generated plan, queries)
         if final_state:
@@ -572,7 +574,7 @@ def main(eval_file: str, output_file: str, max_rows: Optional[int], wait_time: i
             print("\n--- Evaluation Results Sample (First 5 Rows) ---")
             with pd.option_context('display.max_rows', 10, 'display.max_columns', None, 'display.width', 1000, 'display.max_colwidth', 50):
                 print(df_results.head())
-            print("\n--- Evaluation Summary ---")
+            print("\n--- Evaluation Summary (k={k_value}) ---")
             # Calculate basic metrics if desired (e.g., average missing rate)
             if 'Num Target' in df_results.columns and 'Num Missing' in df_results.columns:
                 df_results['Recall@k'] = df_results.apply(lambda r: (r['Num Target'] - r['Num Missing']) / r['Num Target'] if r['Num Target'] > 0 else 0, axis=1)
@@ -593,6 +595,12 @@ def main(eval_file: str, output_file: str, max_rows: Optional[int], wait_time: i
 # --- Argparse and main call ---
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluate the RAG pipeline on the MedMeta dataset.")
+    parser.add_argument(
+        "--k_metrics",
+        type=int,
+        default=RETRIEVER_CONFIG.get('COMPRESSION_TOP_N', 5),
+        help="Value of K for calculating MAP@k and Hit Rate@k."
+    )
     parser.add_argument(
         "--eval_file",
         default=MEDMETA_CSV_PATH,
