@@ -11,7 +11,7 @@ import numpy as np
 
 # Ensure to host vLLM server before running this script
 # Example command to start vLLM server:
-# CUDA_VISIBLE_DEVICES=2,3 vllm serve Qwen/QwQ-32B --tensor-parallel-size 2 --port 8001
+# CUDA_VISIBLE_DEVICES=4,5,6,7 vllm serve Qwen/QwQ-32B --tensor-parallel-size 4 --port 8001
 
 # Ensure the src directory is in the Python path
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
