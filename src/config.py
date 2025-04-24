@@ -51,8 +51,8 @@ RETRIEVER_CONFIG = {
 
 # --- LLM Settings ---
 LLM_CONFIG = {
-    "LLM_PROVIDER": "google", # Or "openai"
-    "LLM_MODEL_NAME": LLM_MODEL_NAME, # Or "gpt-4o-mini" etc.
+    "LLM_PROVIDER": "google", # Or "openai" or "local" or "google"
+    "LLM_MODEL_NAME": LLM_MODEL_NAME, # Or "gpt-4o-mini" or "Qwen/QwQ-32B" etc.
     "LLM_TEMPERATURE": 0.0,
     "LLM_MAX_TOKENS": 32000, # Let the provider handle default or set specific value
     # Optional Google Gemini inference

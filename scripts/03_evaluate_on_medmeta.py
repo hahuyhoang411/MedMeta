@@ -9,6 +9,10 @@ from tqdm import tqdm
 from typing import List, Set, Dict, Any, Optional
 import numpy as np
 
+# Ensure to host vLLM server before running this script
+# Example command to start vLLM server:
+# CUDA_VISIBLE_DEVICES=2,3 vllm serve Qwen/QwQ-32B --tensor-parallel-size 2 --port 8001
+
 # Ensure the src directory is in the Python path
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
