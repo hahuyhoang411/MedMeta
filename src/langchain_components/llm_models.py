@@ -3,36 +3,41 @@ import logging
 from typing import Dict, Any, Optional
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import ChatOpenAI
-from langchain_community.llms import VLLMOpenAI
+# Remove VLLMOpenAI import as it's no longer used
+# from langchain_community.llms import VLLMOpenAI
 from langchain_core.language_models.chat_models import BaseChatModel
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 
-def get_llm(config: Dict[str, Any]) -> Optional[BaseChatModel]: # Adjust return type if needed
+def get_llm(config: Dict[str, Any]) -> Optional[BaseChatModel]:
     """
     Initializes and returns the specified LLM based on the config.
-    Supports 'google', 'openai', and 'local' (vLLM) providers.
+    Supports 'google', 'openai', and 'local' providers.
+    'local' provider uses ChatOpenAI configured for a local OpenAI-compatible endpoint.
 
     Args:
         config: Dictionary containing configuration:
             - LLM_PROVIDER: 'google', 'openai', or 'local'.
             - LLM_MODEL_NAME: Name of the model for the specified provider.
-            - LLM_TEMPERATURE: Sampling temperature (might not be supported by all vLLM models/configs).
+            - LLM_TEMPERATURE: Sampling temperature.
             - LLM_MAX_TOKENS: Maximum number of tokens to generate.
             - GOOGLE_API_KEY_ENV_VAR: Env var name for Google API key (if provider is 'google').
             - OPENAI_API_KEY_ENV_VAR: Env var name for OpenAI API key (if provider is 'openai').
             - OPENAI_BASE_URL: Base URL for OpenAI API (if provider is 'openai').
-            - VLLM_OPENAI_API_BASE: Base URL for the local vLLM OpenAI-compatible server (if provider is 'local').
+            - VLLM_OPENAI_API_BASE: Base URL for the local OpenAI-compatible server (if provider is 'local').
+            - OPENAI_MAX_RETRIES: Max retries for OpenAI calls (used for 'openai' and 'local').
+            - OPENAI_TIMEOUT: Timeout for OpenAI calls (used for 'openai' and 'local').
             # Add other provider-specific config keys as needed
 
     Returns:
-        An instance of the specified LangChain LLM (ChatModel or LLM), or None if initialization fails.
+        An instance of the specified LangChain BaseChatModel, or None if initialization fails.
     """
     provider = config.get('LLM_PROVIDER', 'google').lower() # Default to google
     model_name = config.get('LLM_MODEL_NAME')
-    temperature = config.get('LLM_TEMPERATURE', 0.0) # Note: Temperature might behave differently or not be supported by VLLMOpenAI depending on the backend model/config
+    temperature = config.get('LLM_TEMPERATURE', 0.0)
     max_tokens = config.get('LLM_MAX_TOKENS') # Let provider handle default if None
-    openai_api_base = config.get('VLLM_OPENAI_API_BASE', "http://localhost:8001/v1") # For local provider
+    # Use VLLM_OPENAI_API_BASE for the local provider's base_url
+    openai_api_base = config.get('VLLM_OPENAI_API_BASE', "http://localhost:8001/v1") # Default for local
 
     logging.info(f"Attempting to initialize LLM provider: {provider}")
 
@@ -89,34 +94,33 @@ def get_llm(config: Dict[str, Any]) -> Optional[BaseChatModel]: # Adjust return 
             return llm
 
         elif provider == 'local':
-            # Configuration specific to local vLLM provider
-            openai_api_base = config.get('VLLM_OPENAI_API_BASE') # e.g., "http://localhost:8000/v1"
-            # model_name is already fetched above
+            # Use ChatOpenAI for local provider, pointing to the specified base URL
+            local_api_base = config.get('VLLM_OPENAI_API_BASE') # Get the specific config for local base URL
 
-            if not openai_api_base:
+            if not local_api_base:
                 logging.error("VLLM_OPENAI_API_BASE is missing in the configuration for the 'local' provider.")
                 return None
 
-            logging.info(f"Initializing VLLMOpenAI model: {model_name} via {openai_api_base}")
+            # Use a placeholder API key, as local endpoints often don't require one
+            local_api_key = "NA" # Or "EMPTY" or config.get('LOCAL_API_KEY', 'NA') if you want it configurable
 
-            # Parameters for VLLMOpenAI might differ slightly or have specific requirements
-            # Check langchain_community.llms.VLLMOpenAI documentation for exact parameters
-            llm = VLLMOpenAI(
-                openai_api_key="EMPTY", # Typically required, even if empty for local servers
-                openai_api_base=openai_api_base,
-                model_name=model_name,
-                temperature=temperature, # Pass temperature if supported
-                max_tokens=max_tokens if max_tokens is not None else -1, # vLLM might use -1 or other value for unlimited
-                # model_kwargs could be used for other parameters if needed
-                # model_kwargs={"stop": ["\n"]} # Example
+            # Get other relevant OpenAI parameters from config or use defaults
+            max_retries = config.get('OPENAI_MAX_RETRIES', 2)
+            timeout = config.get('OPENAI_TIMEOUT')
+
+            logging.info(f"Initializing ChatOpenAI model for 'local' provider: {model_name} via {local_api_base}")
+            llm = ChatOpenAI(
+                model=model_name,
+                temperature=temperature,
+                max_tokens=max_tokens if max_tokens is not None else 32000, # Or adjust default as needed
+                api_key=local_api_key,
+                base_url=local_api_base,
+                max_retries=max_retries,
+                timeout=timeout,
+                # other params if needed...
             )
-            # Note: VLLMOpenAI returns an LLM, not a ChatModel.
-            # You might need to adjust how you use it or adjust the function's return type.
-            logging.info("VLLMOpenAI model initialized successfully.")
-            # IMPORTANT: VLLMOpenAI is likely an LLM, not a BaseChatModel.
-            # If your downstream code strictly expects BaseChatModel, this will cause issues.
-            # You might need to adjust the return type annotation and how the returned object is used.
-            return llm # Returning the LLM instance
+            logging.info("ChatOpenAI model for 'local' provider initialized successfully.")
+            return llm # ChatOpenAI is a BaseChatModel
 
         else:
             logging.error(f"Unsupported LLM provider specified: {provider}")
