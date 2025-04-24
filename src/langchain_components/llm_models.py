@@ -32,6 +32,7 @@ def get_llm(config: Dict[str, Any]) -> Optional[BaseChatModel]: # Adjust return 
     model_name = config.get('LLM_MODEL_NAME')
     temperature = config.get('LLM_TEMPERATURE', 0.0) # Note: Temperature might behave differently or not be supported by VLLMOpenAI depending on the backend model/config
     max_tokens = config.get('LLM_MAX_TOKENS') # Let provider handle default if None
+    openai_api_base = config.get('VLLM_OPENAI_API_BASE', "http://localhost:8001/v1") # For local provider
 
     logging.info(f"Attempting to initialize LLM provider: {provider}")
 
