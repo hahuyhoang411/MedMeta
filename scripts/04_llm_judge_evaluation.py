@@ -57,6 +57,14 @@ JUDGE_CONFIGS = [
         "temperature": 0.0, # Keep temperature low for consistency
         "api_base": "http://localhost:8000/v1" # Base URL of vLLM server
     },
+    {
+        "name": "Gemini-Pro",
+        "model": "gemini/gemini-2.5-pro-preview-03-25", # Use latest flash
+        "api_key_env_var": "GEMINI_API_KEY",
+        "max_tokens": 8192, # Adjust if needed
+        "temperature": 0.0,
+        "api_base": None # Not needed for Gemini API
+    },
     # Add more judges here if needed
     # {
     #     "name": "Another-Model",
