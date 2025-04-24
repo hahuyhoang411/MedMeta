@@ -45,7 +45,8 @@ JUDGE_CONFIGS = [
         "api_key_env_var": "GEMINI_API_KEY",
         "max_tokens": 8192, # Adjust if needed
         "temperature": 0.0,
-        "api_base": None # Not needed for Gemini API
+        "api_base": None, # Not needed for Gemini API
+        "reasoning_effort": "medium"
     },
     # Add the vLLM judge based on user's example
     {
@@ -63,7 +64,8 @@ JUDGE_CONFIGS = [
         "api_key_env_var": "GEMINI_API_KEY",
         "max_tokens": 8192, # Adjust if needed
         "temperature": 0.0,
-        "api_base": None # Not needed for Gemini API
+        "api_base": None, # Not needed for Gemini API
+        "reasoning_effort": "medium"
     },
     # Add more judges here if needed
     # {
@@ -117,15 +119,15 @@ def extract_score_and_reasoning(text: str) -> Tuple[Optional[int], Optional[str]
         except ValueError:
             logging.warning(f"Could not parse score from match: {score_match.group(1)}")
 
-    # Extract Reasoning (assuming it follows "Reasoning:")
-    reasoning_match = re.search(r'Reasoning:\s*(.*)', text, re.IGNORECASE | re.DOTALL)
-    if reasoning_match:
-        reasoning = reasoning_match.group(1).strip()
+    # # Extract Reasoning (assuming it follows "Reasoning:")
+    # reasoning_match = re.search(r'Reasoning:\s*(.*)', text, re.IGNORECASE | re.DOTALL)
+    # if reasoning_match:
+    #     reasoning = reasoning_match.group(1).strip()
 
     if score is None and reasoning is None:
          logging.warning(f"Could not extract score or reasoning from text: {text[:100]}...")
          # Fallback: Use the whole text as reasoning if extraction fails
-         reasoning = text.strip() if text else "Extraction Failed"
+         reasoning = text.strip() if text else "Extraction Failed" # Get full text from Judge
 
 
     return score, reasoning
