@@ -10,6 +10,10 @@ import numpy as np
 from tqdm import tqdm
 from typing import Optional, Tuple, List, Dict, Any
 
+# Ensure to host vLLM server before running this script
+# Example command to start vLLM server:
+# CUDA_VISIBLE_DEVICES=4,5,6,7 vllm serve ~/visual-thinker-workspace/models--Qwen--Qwen2.5-72B-Instruct/snapshots/495f39366efef23836d0cfae4fbe635880d2be31/ --tensor-parallel-size 4
+
 # Ensure the src directory is in the Python path
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
