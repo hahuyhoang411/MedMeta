@@ -223,4 +223,6 @@ if not final_samples_df.empty:
 else:
     print("\nNo samples were generated.")
 
+print(f"Sum of 'Number of Refs': {sum(final_samples_df['Number of Refs'])}")
+print(f"Shape of final df: {final_samples_df.shape}")
 # Now 'final_samples_df' contains your desired sample set, filtered and stratified appropriately.

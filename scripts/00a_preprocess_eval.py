@@ -2,19 +2,20 @@ import os
 import csv
 from lxml import etree
 import logging
-from tqdm import tqdm # Import tqdm
+from tqdm import tqdm
 
 # --- Configuration ---
 DATA_FOLDER = 'data_pubmed'
 OUTPUT_CSV = 'meta_analysis_summary.csv'
 DEBUG_MODE = False  # Set this to False for production mode (tqdm, errors only)
                     # Set this to True for debug mode (detailed logs, no tqdm)
-DEBUG_LIMIT = 50
+DEBUG_LIMIT = 5
 CSV_HEADER = [
     'Number',
     'Meta Analysis Name',
     'URL',
     'PMID',
+    'Category',
     'Conclusion',
     'Date (Year)',
     'References', # Adjusted based on realistic extraction
@@ -66,7 +67,7 @@ def get_conclusion(root):
         logger.debug("Conclusion found using sec[@sec-type='conclusions']") # Debug level
         return conclusion
 
-    conclusion = safe_xpath_get_text(root, ".//body//sec[./title[contains(translate(normalize-space(.), 'CONCLUSION', 'conclusion'), 'conclusion')]]//p//text()")
+    conclusion = safe_xpath_get_text(root, ".//sec[./title[contains(translate(normalize-space(.), 'CONCLUSION', 'conclusion'), 'conclusion')]]//p//text()")
     if conclusion:
         logger.debug("Conclusion found using //body//sec//title") # Debug level
         return conclusion
@@ -76,12 +77,12 @@ def get_conclusion(root):
         logger.debug("Conclusion found using abstract//sec//title") # Debug level
         return conclusion
 
-    conclusion = safe_xpath_get_text(root, ".//abstract//p[last()]//text()")
-    if conclusion:
-        logger.debug("Conclusion found using abstract//p[last()] fallback") # Debug level
-        return conclusion
+    # conclusion = safe_xpath_get_text(root, ".//abstract//p[last()]//text()")
+    # if conclusion:
+    #     logger.debug("Conclusion found using abstract//p[last()] fallback") # Debug level
+    #     return conclusion
 
-    logger.warning("Conclusion not found using standard methods.") # Warning level
+    # logger.warning("Conclusion not found using standard methods.") # Warning level
     return ''
 
 def get_year(root):
@@ -179,6 +180,7 @@ def get_table_references(root):
 
 # --- Main Processing ---
 extracted_data = []
+files_skipped_filter = 0
 
 if not os.path.isdir(DATA_FOLDER):
     logger.error(f"Data folder '{DATA_FOLDER}' not found.") # Error level
@@ -230,11 +232,17 @@ for filename in iterable_files:
 
         # --- Extract Data ---
         pmid = safe_xpath_get_text(root, ".//article-meta/article-id[@pub-id-type='pmid']/text()")
-        title = safe_xpath_get_text(root, ".//article-title//text()")
+        title = safe_xpath_get_text(root, ".//title-group/article-title//text()")
         doi = safe_xpath_get_text(root, ".//article-meta/article-id[@pub-id-type='doi']/text()")
         url = f"https://doi.org/{doi}" if doi else ''
-
+        category = safe_xpath_get_text(root, ".//article-categories/subj-group[@subj-group-type='heading']/subject/text()")
         conclusion = get_conclusion(root)
+        if not conclusion:
+            # Log that we are skipping because the conclusion is missing
+            logging.warning(f"Skipping file '{filename}': No conclusion text found.")
+            # Use 'continue' to skip the rest of the loop for this file
+            continue
+            
         year = get_year(root)
 
         ref_pmids_str, num_refs = get_table_references(root)
@@ -246,6 +254,7 @@ for filename in iterable_files:
             title,
             url,
             pmid,
+            category,
             conclusion,
             year,
             ref_pmids_str,
@@ -281,7 +290,7 @@ else:
         logger.info(f"PRODUCTION MODE: Filtering {len(extracted_data)} records to exclude rows where 'References' field is empty (potential mismatches handled in extraction).") # Info level (won't show)
         # Filter based on the actual content of the reference string (index 6)
         # Empty string "" means either no refs found, or a mismatch occurred in production mode.
-        output_data_to_write = [row for row in extracted_data if row[6] != ""]
+        output_data_to_write = [row for row in extracted_data if row[7] != ""]
         logger.info(f"{len(output_data_to_write)} records remain after filtering.") # Info level (won't show)
         # Add a print statement for production mode clarity
         print(f"Extracted data for {len(output_data_to_write)} articles after filtering.")
