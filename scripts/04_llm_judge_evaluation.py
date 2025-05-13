@@ -142,16 +142,16 @@ def extract_score_and_reasoning(text: str) -> Tuple[Optional[int], Optional[str]
         except ValueError:
             logging.warning(f"Could not parse score from match: {score_match.group(1)}")
 
-    # # Extract Reasoning (assuming it follows "Reasoning:")
-    # reasoning_match = re.search(r'Reasoning:\s*(.*)', text, re.IGNORECASE | re.DOTALL)
-    # if reasoning_match:
-    #     reasoning = reasoning_match.group(1).strip()
+    # Assign the full text to reasoning.
+    # This replaces the previous specific reasoning extraction and the complex fallback logic.
+    reasoning = text.strip() if text else "LLM response was empty"
 
-    if score is None and reasoning is None:
-         logging.warning(f"Could not extract score or reasoning from text: {text[:100]}...")
-         # Fallback: Use the whole text as reasoning if extraction fails
-         reasoning = text.strip() if text else "Extraction Failed" # Get full text from Judge
-
+    # Log if score extraction failed.
+    if score is None:
+        if text: # Check if text is not empty before trying to slice it for the log
+            logging.warning(f"Could not extract score from text: '{text[:100]}...'. Full text is used as reasoning.")
+        else:
+            logging.warning("Could not extract score, and the LLM response was empty.")
 
     return score, reasoning
 
