@@ -357,7 +357,6 @@ def main(input_file: str, output_file: str, max_rows: Optional[int], wait_time: 
     num_rows_to_process = len(df_eval)
     # Store aggregated results per row
     aggregated_scores = []
-    aggregated_reasonings = []
     # Store individual judge results per row (optional, for detailed analysis)
     individual_judge_results: Dict[str, List[Optional[Any]]] = {f"{cfg['name']}_Score": [] for cfg in JUDGE_CONFIGS}
     individual_judge_results.update({f"{cfg['name']}_Reasoning": [] for cfg in JUDGE_CONFIGS})
@@ -422,7 +421,6 @@ def main(input_file: str, output_file: str, max_rows: Optional[int], wait_time: 
             combined_reasoning = "\n---\n".join(str(r) for r in row_reasonings if r is not None)
 
         aggregated_scores.append(mean_score)
-        aggregated_reasonings.append(combined_reasoning)
 
         end_row_time = time.time()
         logging.info(f"Row {index+1} judged by all judges in {end_row_time - start_row_time:.2f} seconds. Mean Score: {mean_score if mean_score is not None else 'N/A'}")
@@ -435,7 +433,6 @@ def main(input_file: str, output_file: str, max_rows: Optional[int], wait_time: 
     # --- Add results and Save ---
     logging.info("LLM judgment loop finished.")
     df_eval['Mean LLM Judge Score'] = aggregated_scores
-    df_eval['Combined LLM Judge Reasoning'] = aggregated_reasonings
 
     # Add individual judge results to the DataFrame
     for col_name, results_list in individual_judge_results.items():
