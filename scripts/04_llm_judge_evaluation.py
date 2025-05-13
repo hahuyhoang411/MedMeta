@@ -333,6 +333,18 @@ def main(input_file: str, output_file: str, max_rows: Optional[int], wait_time: 
     # --- Pre-fetch API Keys if needed (optional optimization) ---
     # You could pre-fetch keys here to avoid doing it in the loop,
     # especially if prompting is required. For now, get_api_key handles it.
+    logging.info("Pre-fetching API keys if necessary...")
+    processed_env_vars = set() # To avoid prompting for the same env var multiple times
+    for config in JUDGE_CONFIGS:
+        api_key_env = config.get("api_key_env_var")
+        if api_key_env and api_key_env not in processed_env_vars:
+            # If api_key is not directly provided and not in os.environ yet for this env_var
+            if not config.get("api_key") and not os.environ.get(api_key_env):
+                logging.info(f"Checking API key for environment variable: {api_key_env}")
+                get_api_key(api_key_env) # This will prompt if needed and store in os.environ
+            processed_env_vars.add(api_key_env)
+    logging.info("Finished pre-fetching API keys.")
+
 
     # --- Load Evaluation Data ---
     logging.info(f"Loading evaluation results from: {input_file}")
