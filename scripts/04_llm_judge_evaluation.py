@@ -9,6 +9,7 @@ import pandas as pd
 import numpy as np
 from tqdm import tqdm
 from typing import Optional, Tuple, List, Dict, Any
+from concurrent.futures import ThreadPoolExecutor
 
 # Ensure to host vLLM server before running this script
 # Example command to start vLLM server:
@@ -370,50 +371,48 @@ def main(input_file: str, output_file: str, max_rows: Optional[int], wait_time: 
 
         logging.info(f"\n--- Judging Row {index+1}/{num_rows_to_process} (Number: {original_number}) ---")
 
-        row_scores = []
-        row_reasonings = []
+        row_scores = [None] * len(JUDGE_CONFIGS) # Initialize with Nones to preserve order
+        row_reasonings = [None] * len(JUDGE_CONFIGS) # Initialize with Nones
 
         # Skip rows where the original conclusion was skipped or errored
         if str(row.get('Generated Conclusion', '')).startswith('Skipped') or \
            str(row.get('Generated Conclusion', '')).startswith('Error'):
             logging.warning(f"Skipping LLM judgment for row {index+1} due to previous skip/error.")
-            # Append Nones for all judges for this row
             mean_score = None
             combined_reasoning = "Skipped - Prior Error/Skip"
-            for cfg in JUDGE_CONFIGS:
-                 row_scores.append(None)
-                 row_reasonings.append(f"[{cfg['name']}] Skipped - Prior Error/Skip")
+            for i, cfg in enumerate(JUDGE_CONFIGS):
+                 # No need to append to row_scores/row_reasonings here, they remain None
                  individual_judge_results[f"{cfg['name']}_Score"].append(None)
                  individual_judge_results[f"{cfg['name']}_Reasoning"].append("Skipped - Prior Error/Skip")
-
         else:
-            # --- Inner loop for judges ---
-            for judge_idx, judge_config in enumerate(JUDGE_CONFIGS):
-                judge_name = judge_config.get("name", f"Judge_{judge_idx}")
-                logging.info(f"--- Calling Judge {judge_idx+1}/{len(JUDGE_CONFIGS)}: {judge_name} ---")
+            # --- Parallel execution for judges ---
+            with ThreadPoolExecutor(max_workers=len(JUDGE_CONFIGS)) as executor:
+                future_to_judge_idx = {}
+                for judge_idx, judge_config in enumerate(JUDGE_CONFIGS):
+                    judge_name = judge_config.get("name", f"Judge_{judge_idx}")
+                    logging.info(f"--- Submitting task for Judge {judge_idx+1}/{len(JUDGE_CONFIGS)}: {judge_name} for row {index+1} ---")
+                    future = executor.submit(get_llm_judgment, row, judge_config)
+                    future_to_judge_idx[future] = judge_idx
 
-                score, reasoning = get_llm_judgment(row, judge_config)
+                for future in future_to_judge_idx:
+                    judge_idx = future_to_judge_idx[future]
+                    judge_config = JUDGE_CONFIGS[judge_idx]
+                    judge_name = judge_config.get("name", f"Judge_{judge_idx}")
+                    try:
+                        score, reasoning = future.result() # Blocks until this judge completes
+                        row_scores[judge_idx] = score
+                        row_reasonings[judge_idx] = reasoning
+                        individual_judge_results[f"{judge_name}_Score"].append(score)
+                        individual_judge_results[f"{judge_name}_Reasoning"].append(reasoning)
+                        logging.info(f"Judge {judge_name} for row {index+1} finished. Score: {score}")
+                    except Exception as exc:
+                        logging.error(f"Judge {judge_name} for row {index+1} generated an exception: {exc}")
+                        # row_scores[judge_idx] and row_reasonings[judge_idx] remain None
+                        individual_judge_results[f"{judge_name}_Score"].append(None)
+                        individual_judge_results[f"{judge_name}_Reasoning"].append(f"Error during judgment: {exc}")
 
-                row_scores.append(score)
-                row_reasonings.append(reasoning)
-                individual_judge_results[f"{judge_name}_Score"].append(score)
-                individual_judge_results[f"{judge_name}_Reasoning"].append(reasoning)
 
-
-                logging.info(f"Judge {judge_name} finished. Score: {score}")
-
-                # Wait between judge calls ONLY if the NEXT judge is API-based (no api_base)
-                is_last_judge = (judge_idx == len(JUDGE_CONFIGS) - 1)
-                if wait_time > 0 and not is_last_judge:
-                    next_judge_config = JUDGE_CONFIGS[judge_idx + 1]
-                    next_judge_is_local = next_judge_config.get("api_base") is not None
-                    if not next_judge_is_local:
-                        logging.info(f"Waiting {wait_time}s before next judge (API call)...")
-                        time.sleep(wait_time)
-                    else:
-                         logging.debug(f"Skipping wait time, next judge '{next_judge_config.get('name')}' is local.")
-
-            # --- End of judges loop ---
+            # --- End of judges processing for the row ---
 
             # Calculate mean score for the row, ignoring None values
             valid_scores = [s for s in row_scores if s is not None]
@@ -422,7 +421,6 @@ def main(input_file: str, output_file: str, max_rows: Optional[int], wait_time: 
             # Combine reasonings (simple join)
             combined_reasoning = "\n---\n".join(str(r) for r in row_reasonings if r is not None)
 
-
         aggregated_scores.append(mean_score)
         aggregated_reasonings.append(combined_reasoning)
 
@@ -430,9 +428,9 @@ def main(input_file: str, output_file: str, max_rows: Optional[int], wait_time: 
         logging.info(f"Row {index+1} judged by all judges in {end_row_time - start_row_time:.2f} seconds. Mean Score: {mean_score if mean_score is not None else 'N/A'}")
 
         # Optional: Wait between rows (if judges have shared rate limits or to reduce load)
-        # if wait_time > 0 and index < num_rows_to_process - 1:
-        #     logging.info(f"Waiting for {wait_time} seconds before next row...")
-        #     time.sleep(wait_time)
+        if wait_time > 0 and index < num_rows_to_process - 1:
+            logging.info(f"Waiting for {wait_time} seconds before next row...")
+            time.sleep(wait_time)
 
     # --- Add results and Save ---
     logging.info("LLM judgment loop finished.")

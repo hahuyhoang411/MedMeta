@@ -3,6 +3,7 @@ import logging
 from typing import Dict, Any, Optional
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import ChatOpenAI
+from langchain_google_vertexai import ChatVertexAI
 # Remove VLLMOpenAI import as it's no longer used
 # from langchain_community.llms import VLLMOpenAI
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -27,6 +28,7 @@ def get_llm(config: Dict[str, Any]) -> Optional[BaseChatModel]:
             - VLLM_OPENAI_API_BASE: Base URL for the local OpenAI-compatible server (if provider is 'local').
             - OPENAI_MAX_RETRIES: Max retries for OpenAI calls (used for 'openai' and 'local').
             - OPENAI_TIMEOUT: Timeout for OpenAI calls (used for 'openai' and 'local').
+            - LLM_GOOGLE_THINKING_BUDGET: Thinking budget for Google Generative AI (if provider is 'google').
             # Add other provider-specific config keys as needed
 
     Returns:
@@ -38,6 +40,7 @@ def get_llm(config: Dict[str, Any]) -> Optional[BaseChatModel]:
     max_tokens = config.get('LLM_MAX_TOKENS') # Let provider handle default if None
     # Use VLLM_OPENAI_API_BASE for the local provider's base_url
     openai_api_base = config.get('VLLM_OPENAI_API_BASE', "http://localhost:8001/v1") # Default for local
+    google_thinking_budget = config.get('LLM_GOOGLE_THINKING_BUDGET')
 
     logging.info(f"Attempting to initialize LLM provider: {provider}")
 
@@ -54,16 +57,36 @@ def get_llm(config: Dict[str, Any]) -> Optional[BaseChatModel]:
                 return None
 
             logging.info(f"Initializing ChatGoogleGenerativeAI model: {model_name}")
-            llm = ChatGoogleGenerativeAI(
+            llm_params = {
+                "model": model_name,
+                "temperature": temperature,
+                "max_tokens": max_tokens if max_tokens is not None else 32000,
+                "google_api_key": api_key,
+            }
+            if google_thinking_budget is not None:
+                llm_params["thinking_budget"] = google_thinking_budget
+
+            llm = ChatGoogleGenerativeAI(**llm_params)
+            logging.info("ChatGoogleGenerativeAI model initialized successfully.")
+            return llm
+
+        if provider == 'vertex-google':
+            api_key_env_var = config.get('GOOGLE_API_KEY_ENV_VAR', 'GOOGLE_API_KEY')
+            api_key = os.environ.get(api_key_env_var)
+            if not api_key:
+                logging.error(f"Google API key not found in environment variable '{api_key_env_var}'.")
+                return None
+
+            logging.info(f"Initializing ChatGoogleGenerativeAI model: {model_name}")
+            llm = ChatVertexAI(
                 model=model_name,
                 temperature=temperature,
                 max_tokens=max_tokens if max_tokens is not None else 32000,
                 google_api_key=api_key,
-                # convert_system_message_to_human=True # May be needed depending on model/usage
             )
-            logging.info("ChatGoogleGenerativeAI model initialized successfully.")
+            logging.info("ChatVertexAI model initialized successfully.")
             return llm
-
+        
         elif provider == 'openai':
             api_key_env_var = config.get('OPENAI_API_KEY_ENV_VAR', 'OPENAI_API_KEY')
             api_key = os.environ.get(api_key_env_var)
