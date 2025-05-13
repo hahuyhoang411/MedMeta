@@ -1,0 +1,12 @@
+langchain-core
+langchain-community
+langchain-google-genai
+langchain-openai
+langgraph
+rank_bm25
+sentence-transformers
+faiss-gpu-cu12
+litellm
+vllm
+datasets
+dotenv

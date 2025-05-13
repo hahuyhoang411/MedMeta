@@ -43,33 +43,51 @@ logging.getLogger("litellm").setLevel(logging.WARNING) # Further reduce litellm 
 # NOTE: Ensure vLLM server is running and accessible at the specified api_base
 # NOTE: Update vllm_model_id path if necessary
 JUDGE_CONFIGS = [
+    # {
+    #     "name": "Gemini-Flash",
+    #     "model": "gemini/gemini-2.5-flash-preview-04-17", # Use latest flash
+    #     "api_key_env_var": "GEMINI_API_KEY",
+    #     "max_tokens": 8192, # Adjust if needed
+    #     "temperature": 0.0,
+    #     "api_base": None, # Not needed for Gemini API
+    #     "reasoning_effort": "medium"
+    # },
+    # # Add the vLLM judge based on user's example
+    # {
+    #     "name": "Local-Qwen2.5-72B",
+    #     # Use the exact model ID reported by vLLM's /v1/models endpoint
+    #     "model": "hosted_vllm//home/jovyan/visual-thinker-workspace/models--Qwen--Qwen2.5-72B-Instruct/snapshots/495f39366efef23836d0cfae4fbe635880d2be31/",
+    #     "api_key": "NA", # No API key needed for local vLLM usually
+    #     "max_tokens": 8192, # As per user example
+    #     "temperature": 0.0, # Keep temperature low for consistency
+    #     "api_base": "http://localhost:8000/v1" # Base URL of vLLM server
+    # },
     {
-        "name": "Gemini-Flash",
-        "model": "gemini/gemini-2.5-flash-preview-04-17", # Use latest flash
+        "name": "Gemini-Pro-Low",
+        "model": "gemini/gemini-2.5-pro-preview-03-25", # Use latest flash
         "api_key_env_var": "GEMINI_API_KEY",
         "max_tokens": 8192, # Adjust if needed
         "temperature": 0.0,
         "api_base": None, # Not needed for Gemini API
-        "reasoning_effort": "medium"
+        "reasoning_effort": "low"
     },
-    # Add the vLLM judge based on user's example
-    {
-        "name": "Local-Qwen2.5-72B",
-        # Use the exact model ID reported by vLLM's /v1/models endpoint
-        "model": "hosted_vllm//home/jovyan/visual-thinker-workspace/models--Qwen--Qwen2.5-72B-Instruct/snapshots/495f39366efef23836d0cfae4fbe635880d2be31/",
-        "api_key": "NA", # No API key needed for local vLLM usually
-        "max_tokens": 8192, # As per user example
-        "temperature": 0.0, # Keep temperature low for consistency
-        "api_base": "http://localhost:8000/v1" # Base URL of vLLM server
-    },
-    {
-        "name": "Gemini-Pro",
+        {
+        "name": "Gemini-Pro-Medium",
         "model": "gemini/gemini-2.5-pro-preview-03-25", # Use latest flash
         "api_key_env_var": "GEMINI_API_KEY",
         "max_tokens": 8192, # Adjust if needed
         "temperature": 0.0,
         "api_base": None, # Not needed for Gemini API
         "reasoning_effort": "medium"
+    },
+        {
+        "name": "Gemini-Pro-High",
+        "model": "gemini/gemini-2.5-pro-preview-03-25", # Use latest flash
+        "api_key_env_var": "GEMINI_API_KEY",
+        "max_tokens": 8192, # Adjust if needed
+        "temperature": 0.0,
+        "api_base": None, # Not needed for Gemini API
+        "reasoning_effort": "high"
     },
     # Add more judges here if needed
     # {
