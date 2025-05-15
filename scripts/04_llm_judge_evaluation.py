@@ -91,12 +91,11 @@ JUDGE_CONFIGS = [
         "model": "o4-mini", # Use latest flash
         "api_key_env_var": "OPENAI_API_KEY",
         "max_tokens": 8192, # Adjust if needed
-        "temperature": 0.0,
         "api_base": None, # Not needed for OpenRouter API
     },
     {
         "name": "Qwen3-235B-A22B",
-        "model": "deepinfra/qwen/qwen3-235b-a22b", # Use latest flash
+        "model": "deepinfra/Qwen/Qwen3-235B-A22B", # Use latest flash
         "api_key_env_var": "DEEPINFRA_API_KEY",
         "max_tokens": 8192, # Adjust if needed
         "temperature": 0.0,
