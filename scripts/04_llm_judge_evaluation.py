@@ -88,7 +88,7 @@ JUDGE_CONFIGS = [
     # },
     {
         "name": "OpenAI-o4-mini-high",
-        "model": "openai/o4-mini-high", # Use latest flash
+        "model": "openrouter/openai/o4-mini-high", # Use latest flash
         "api_key_env_var": "OPENROUTER_API_KEY",
         "max_tokens": 8192, # Adjust if needed
         "temperature": 0.0,
@@ -96,7 +96,7 @@ JUDGE_CONFIGS = [
     },
     {
         "name": "Qwen3-235B-A22B",
-        "model": "qwen/qwen3-235b-a22b", # Use latest flash
+        "model": "openrouter/qwen/qwen3-235b-a22b", # Use latest flash
         "api_key_env_var": "OPENROUTER_API_KEY",
         "max_tokens": 8192, # Adjust if needed
         "temperature": 0.0,
