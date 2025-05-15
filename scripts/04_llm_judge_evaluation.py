@@ -147,7 +147,7 @@ def extract_score_and_reasoning(text: str) -> Tuple[Optional[int], Optional[str]
     reasoning = None
 
     # Extract Score
-    score_match = re.search(r'Score:\s*(\d+)', text, re.IGNORECASE)
+    score_match = re.search(r'Score:[\s\*]*(\d+)', text, re.IGNORECASE)
     if score_match:
         try:
             score = int(score_match.group(1))
