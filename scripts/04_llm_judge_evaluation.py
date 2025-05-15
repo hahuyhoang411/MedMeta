@@ -91,6 +91,7 @@ JUDGE_CONFIGS = [
         "model": "o4-mini", # Use latest flash
         "api_key_env_var": "OPENAI_API_KEY",
         "max_tokens": 8192, # Adjust if needed
+        "temperature": 1.0, # OpenAi requires temperature to be set at 1.0 for O series
         "api_base": None, # Not needed for OpenRouter API
     },
     {
