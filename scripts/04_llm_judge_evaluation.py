@@ -11,10 +11,6 @@ from tqdm import tqdm
 from typing import Optional, Tuple, List, Dict, Any
 from concurrent.futures import ThreadPoolExecutor
 
-# Ensure to host vLLM server before running this script
-# Example command to start vLLM server:
-# CUDA_VISIBLE_DEVICES=4,5,6,7 vllm serve ~/visual-thinker-workspace/models--Qwen--Qwen2.5-72B-Instruct/snapshots/495f39366efef23836d0cfae4fbe635880d2be31/ --tensor-parallel-size 4 --port 8000
-
 # Ensure the src directory is in the Python path
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
@@ -72,24 +68,40 @@ JUDGE_CONFIGS = [
         "api_base": None, # Not needed for Gemini API
         "reasoning_effort": "low"
     },
-        {
-        "name": "Gemini-Pro-Medium",
-        "model": "gemini/gemini-2.5-pro-preview-03-25", # Use latest flash
-        "api_key_env_var": "GEMINI_API_KEY",
+    #     {
+    #     "name": "Gemini-Pro-Medium",
+    #     "model": "gemini/gemini-2.5-pro-preview-03-25", # Use latest flash
+    #     "api_key_env_var": "GEMINI_API_KEY",
+    #     "max_tokens": 8192, # Adjust if needed
+    #     "temperature": 0.0,
+    #     "api_base": None, # Not needed for Gemini API
+    #     "reasoning_effort": "medium"
+    # },
+    #     {
+    #     "name": "Gemini-Pro-High",
+    #     "model": "gemini/gemini-2.5-pro-preview-03-25", # Use latest flash
+    #     "api_key_env_var": "GEMINI_API_KEY",
+    #     "max_tokens": 8192, # Adjust if needed
+    #     "temperature": 0.0,
+    #     "api_base": None, # Not needed for Gemini API
+    #     "reasoning_effort": "high"
+    # },
+    {
+        "name": "OpenAI-o4-mini-high",
+        "model": "openai/o4-mini-high", # Use latest flash
+        "api_key_env_var": "OPENROUTER_API_KEY",
         "max_tokens": 8192, # Adjust if needed
         "temperature": 0.0,
-        "api_base": None, # Not needed for Gemini API
-        "reasoning_effort": "medium"
+        "api_base": None, # Not needed for OpenRouter API
     },
-        {
-        "name": "Gemini-Pro-High",
-        "model": "gemini/gemini-2.5-pro-preview-03-25", # Use latest flash
-        "api_key_env_var": "GEMINI_API_KEY",
+    {
+        "name": "Qwen3-235B-A22B",
+        "model": "qwen/qwen3-235b-a22b", # Use latest flash
+        "api_key_env_var": "OPENROUTER_API_KEY",
         "max_tokens": 8192, # Adjust if needed
         "temperature": 0.0,
-        "api_base": None, # Not needed for Gemini API
-        "reasoning_effort": "high"
-    },
+        "api_base": None, # Not needed for OpenRouter API
+    }
     # Add more judges here if needed
     # {
     #     "name": "Another-Model",
@@ -520,5 +532,11 @@ if __name__ == "__main__":
         wait_time=args.wait_time
     )
 
-    # Example usage from command line:
-    # python scripts/04_llm_judge_evaluation.py --input_file ../output/hybrid.csv --output_file ../output/judged_results.csv --max_rows 20 --wait_time 30
+# Ensure to host vLLM server before running this script
+# Example command to start vLLM server:
+# CUDA_VISIBLE_DEVICES=4,5,6,7 vllm serve ~/visual-thinker-workspace/models--Qwen--Qwen2.5-72B-Instruct/snapshots/495f39366efef23836d0cfae4fbe635880d2be31/ --tensor-parallel-size 4 --port 8000
+# export OPENROUTER_API_KEY='your_actual_api_key_here'
+# export GEMINI_API_KEY='your_actual_api_key_here'
+
+# Example usage from command line:
+# python scripts/04_llm_judge_evaluation.py --input_file ../output/hybrid.csv --output_file ../output/judged_results.csv --max_rows 20 --wait_time 30
