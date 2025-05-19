@@ -4,13 +4,13 @@ import numpy as np
 # Load the dataframe
 try:
     # Make sure this CSV has the 'Topic' column or adjust TOPIC_COL below
-    df = pd.read_csv("meta_analysis_summary_cat.csv")
+    df = pd.read_csv("meta_analysis_summary_cleaned_topic.csv")
     print("DataFrame loaded successfully.")
     # Optional: Display first few rows and info to verify columns
     # print(df.head())
     # print(df.info())
 except FileNotFoundError:
-    print("Error: 'meta_analysis_summary_cat.csv' not found. Make sure the file is in the correct directory.")
+    print("Error: 'meta_analysis_summary_cleaned_topic.csv' not found. Make sure the file is in the correct directory.")
     exit()
 except Exception as e:
     print(f"An error occurred while loading the CSV: {e}")
