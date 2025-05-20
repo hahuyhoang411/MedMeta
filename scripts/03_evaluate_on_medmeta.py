@@ -8,6 +8,7 @@ import pandas as pd
 from tqdm import tqdm
 from typing import List, Set, Dict, Any, Optional
 import numpy as np
+from langchain.retrievers import ContextualCompressionRetriever
 
 # Ensure to host vLLM server before running this script
 # Example command to start vLLM server:
@@ -141,41 +142,47 @@ def calculate_average_precision_at_k(ordered_retrieved_pmids: List[int], target_
     # Normalize by the total number of relevant documents (min(k, len(target_pmids)) is sometimes used, but standard is len(target_pmids))
     return ap_sum / len(target_pmids) if target_pmids else 0.0
     
-def setup_pipeline():
+def setup_pipeline(use_llm_knowledge: bool):
     """Consolidated setup function to prepare data, retrievers, LLM, and graph."""
     logging.info("--- Setting up RAG Pipeline for Evaluation ---")
     logging.info(f"Using device: {DEVICE}")
+    if use_llm_knowledge:
+        logging.info("LLM knowledge path selected. Skipping RAG dataset and retriever setup.")
 
-    # --- 1. Load and Prepare Data ---
-    ref_dataset = load_local_csv_dataset(FETCHED_DATA_CSV_PATH)
-    if ref_dataset is None: raise RuntimeError("Failed to load reference dataset.")
+    # --- 1. Load and Prepare Data (Conditional) ---
+    compression_retriever: Optional[ContextualCompressionRetriever] = None
+    if not use_llm_knowledge:
+        ref_dataset = load_local_csv_dataset(FETCHED_DATA_CSV_PATH)
+        if ref_dataset is None: raise RuntimeError("Failed to load reference dataset.")
 
-    processed_pubmed_dataset = load_and_process_pubmed25(
-        dataset_name=PUBMED25_DATASET_NAME, split=PUBMED25_SPLIT, cache_dir=CACHE_DIR
-    )
-    datasets_to_combine = [ref_dataset]
-    if processed_pubmed_dataset and len(processed_pubmed_dataset) > 0:
-        small_pubmed_subset = processed_pubmed_dataset.select(range(min(PUBMED25_SUBSET_SIZE, len(processed_pubmed_dataset))))
-        datasets_to_combine.append(small_pubmed_subset)
-    rag_dataset = concatenate_hf_datasets(datasets_to_combine)
-    if rag_dataset is None: raise RuntimeError("Failed to create combined dataset.")
-    logging.info(f"RAG dataset ready with {len(rag_dataset)} documents.")
+        processed_pubmed_dataset = load_and_process_pubmed25(
+            dataset_name=PUBMED25_DATASET_NAME, split=PUBMED25_SPLIT, cache_dir=CACHE_DIR
+        )
+        datasets_to_combine = [ref_dataset]
+        if processed_pubmed_dataset and len(processed_pubmed_dataset) > 0:
+            small_pubmed_subset = processed_pubmed_dataset.select(range(min(PUBMED25_SUBSET_SIZE, len(processed_pubmed_dataset))))
+            datasets_to_combine.append(small_pubmed_subset)
+        rag_dataset = concatenate_hf_datasets(datasets_to_combine)
+        if rag_dataset is None: raise RuntimeError("Failed to create combined dataset.")
+        logging.info(f"RAG dataset ready with {len(rag_dataset)} documents.")
 
-    # --- 2. Load LangChain Docs ---
-    loader = CustomHuggingFaceDatasetLoader(rag_dataset, metadata_columns=["PMID", "Year"])
-    docs = loader.load()
-    if not docs: raise RuntimeError("No documents loaded into LangChain format.")
-    logging.info(f"Loaded {len(docs)} LangChain documents.")
+        # --- 2. Load LangChain Docs (Conditional) ---
+        loader = CustomHuggingFaceDatasetLoader(rag_dataset, metadata_columns=["PMID", "Year"])
+        docs = loader.load()
+        if not docs: raise RuntimeError("No documents loaded into LangChain format.")
+        logging.info(f"Loaded {len(docs)} LangChain documents.")
 
-    # --- 3. Setup Retrievers ---
-    compression_retriever = setup_retrieval_chain(docs, config=RETRIEVER_CONFIG, device=DEVICE)
-    if compression_retriever is None: raise RuntimeError("Failed to setup retrieval chain.")
+        # --- 3. Setup Retrievers (Conditional) ---
+        compression_retriever = setup_retrieval_chain(docs, config=RETRIEVER_CONFIG, device=DEVICE)
+        if compression_retriever is None: raise RuntimeError("Failed to setup retrieval chain for document retrieval path.")
+    # else: compression_retriever remains None
 
-    # --- 4. Setup LLM ---
+    # --- 4. Setup LLM (Always needed) ---
     llm = get_llm(config=LLM_CONFIG)
     if llm is None: raise RuntimeError("Failed to setup LLM.")
 
     # --- 5. Build Graph ---
+    # Pass the potentially None retriever
     app = build_graph(llm=llm, retriever=compression_retriever)
     if app is None: raise RuntimeError("Failed to build LangGraph application.")
 
@@ -201,7 +208,7 @@ def main(eval_file: str, output_file: str, max_rows: Optional[int], wait_time: i
 
     # --- Setup the Pipeline ---
     try:
-        rag_app = setup_pipeline()
+        rag_app = setup_pipeline(use_llm_knowledge=use_llm_knowledge)
     except RuntimeError as e:
         logging.error(f"Pipeline setup failed: {e}. Exiting.")
         return

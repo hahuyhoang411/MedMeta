@@ -55,7 +55,7 @@ def decide_knowledge_path(state: MetaAnalysisState) -> str:
 
 # --- Build the Graph ---
 
-def build_graph(llm: BaseChatModel, retriever: ContextualCompressionRetriever) -> Optional[StateGraph]:
+def build_graph(llm: BaseChatModel, retriever: Optional[ContextualCompressionRetriever]) -> Optional[StateGraph]:
     """
     Builds and compiles the LangGraph for the meta-analysis pipeline.
 
