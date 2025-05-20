@@ -1,205 +1,338 @@
-import time
+# src/data_processing/pubmed_fetcher.py
+
 import requests
+import time
 import pandas as pd
-import lxml.etree as ET
-import re
+from xml.etree import ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
+from typing import List, Dict, Any, Optional, Tuple
+from tqdm import tqdm
+import re
+
+# Ensure imports from config are correct
+import sys
 import os
-from typing import List, Dict, Optional
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(os.path.dirname(SCRIPT_DIR))
+sys.path.insert(0, PROJECT_ROOT)
 
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# --- Fetching Parameters (New/Modified) ---
+FETCH_BATCH_SIZE = 200          # Max IDs per EFetch request is typically 200
+FETCH_MAX_WORKERS = 10          # Number of threads for concurrent requests
+FETCH_MAX_RETRIES = 5           # Max retries per batch request
+FETCH_BACKOFF_FACTOR = 2        # Exponential backoff multiplier (seconds)
+FETCH_TIMEOUT = 60              # Timeout for each HTTP request in seconds
+FETCH_DELAY_PER_BATCH = 0.1     # Small delay between starting batch requests to be gentle
+# --- NCBI ---
+NCBI_API_KEY = os.environ.get("NCBI_API_KEY")
+NCBI_EMAIL = os.environ.get("NCBI_EMAIL", "your_email@example.com") # Good practice to provide email
+EUTILS_BASE_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/"
 
-def extract_year(pubdate_element: Optional[ET._Element]) -> str:
+# --- Default Columns ---
+DEFAULT_PMID_COLUMN = 'References' # Or whatever column name you use
+
+# Configure logging (optional, main script also configures)
+# logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+
+def _parse_pubmed_article_xml(article_xml: ET.Element) -> Dict[str, Any]:
     """
-    Helper function to extract the year from various PubDate structures.
-    Prioritizes <Year>, then tries to parse <MedlineDate>.
+    Parses a single PubMed Article XML element and extracts relevant data,
+    including the Year.
 
     Args:
-        pubdate_element: The PubDate XML element or None.
+        article_xml: An ElementTree element representing a single PubMedArticle.
 
     Returns:
-        The extracted year as a string, or "No year found".
+        A dictionary containing extracted data. Keys should match desired raw DataFrame columns.
     """
-    if pubdate_element is None:
-        return "No year found"
-
-    year_element = pubdate_element.find("Year")
-    if year_element is not None and year_element.text and year_element.text.isdigit():
-        return year_element.text
-
-    medline_date_element = pubdate_element.find("MedlineDate")
-    if medline_date_element is not None and medline_date_element.text:
-        # Extract first 4 digits if they look like a year
-        match = re.match(r"^\d{4}", medline_date_element.text)
-        if match:
-            return match.group(0)
-
-    return "No year found"
-
-def get_pubmed_data_bulk(pmid_list: List[str], api_key: Optional[str] = None) -> pd.DataFrame:
-    """
-    Fetch Title, Year, and Abstract in bulk using epost + efetch given a list of PMIDs.
-
-    Args:
-        pmid_list: A list of PubMed IDs (strings).
-        api_key: Optional NCBI API key for higher rate limits.
-
-    Returns:
-        pandas.DataFrame: DataFrame with columns "PMID", "Year", "Title", "Abstract".
-                         Returns an empty DataFrame if pmid_list is empty or no data found.
-    """
-    if not pmid_list:
-        logging.warning("Input PMID list is empty. Returning empty DataFrame.")
-        return pd.DataFrame(columns=["PMID", "Year", "Title", "Abstract"])
-
-    # Ensure all PMIDs are strings
-    pmid_list = [str(p) for p in pmid_list]
-    logging.info(f"Attempting to fetch data for {len(pmid_list)} PMIDs...")
-
-    # --- epost to store PMIDs ---
-    epost_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/epost.fcgi"
-    epost_params: Dict[str, str] = {"db": "pubmed", "id": ",".join(pmid_list)}
-    if api_key:
-         epost_params["api_key"] = api_key
+    data: Dict[str, Any] = {}
 
     try:
-        epost_response = requests.post(epost_url, data=epost_params, timeout=30) # Increased timeout
-        epost_response.raise_for_status()
-
-        epost_root = ET.fromstring(epost_response.content)
-        webenv_element = epost_root.find(".//WebEnv")
-        query_key_element = epost_root.find(".//QueryKey")
-
-        if webenv_element is None or query_key_element is None:
-            logging.error("Could not find WebEnv or QueryKey in epost response.")
-            logging.error(f"Epost response content: {epost_response.text}")
-            return pd.DataFrame(columns=["PMID", "Year", "Title", "Abstract"])
-
-        webenv = webenv_element.text
-        query_key = query_key_element.text
-        logging.info("Epost successful, obtained WebEnv and QueryKey.")
-
-    except requests.RequestException as e:
-        logging.error(f"Error during epost request: {e}")
-        return pd.DataFrame(columns=["PMID", "Year", "Title", "Abstract"])
-    except ET.XMLSyntaxError as e:
-        logging.error(f"Error parsing epost XML response: {e}")
-        logging.error(f"Epost response content: {epost_response.text}")
-        return pd.DataFrame(columns=["PMID", "Year", "Title", "Abstract"])
-
-    # --- efetch to retrieve full records ---
-    efetch_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
-    efetch_params: Dict[str, str] = {
-        "db": "pubmed",
-        "query_key": query_key,
-        "WebEnv": webenv,
-        "retmode": "xml",
-        "rettype": "abstract"
-    }
-    if api_key:
-        efetch_params["api_key"] = api_key
-
-    results_list: List[Dict[str, str]] = [] # Store results as a list of dictionaries
-
-    try:
-        # Adjust retmax if needed, though history server should handle large numbers
-        # Add batching logic here if dealing with >10,000 PMIDs at once
-        logging.info("Sending efetch request...")
-        efetch_response = requests.get(efetch_url, params=efetch_params, timeout=90) # Increased timeout
-        efetch_response.raise_for_status()
-        logging.info("Efetch request successful.")
-
-        efetch_root = ET.fromstring(efetch_response.content)
-        articles_found_count = 0
-
-        for article in efetch_root.xpath(".//PubmedArticle"):
-            articles_found_count += 1
-            pmid = "Not found"
-            title = "No title found"
-            year = "No year found"
-            abstract_text = "No abstract found"
-
-            pmid_element = article.find(".//PMID")
-            if pmid_element is not None and pmid_element.text:
-                pmid = pmid_element.text
+        # Extract basic info
+        medline_citation = article_xml.find('.//MedlineCitation')
+        if medline_citation is not None:
+            pmid_elem = medline_citation.find('.//PMID')
+            if pmid_elem is not None:
+                data['PMID'] = pmid_elem.text
             else:
-                 logging.warning("Found an article structure with no PMID element.")
-                 continue # Skip article if PMID is missing
+                 data['PMID'] = None
 
-            title_element = article.find(".//ArticleTitle")
-            if title_element is not None:
-                 # Handle potential complex title structures (e.g., with HTML tags)
-                 title = ET.tostring(title_element, method='text', encoding='unicode').strip()
-                 if not title:
-                      title = "No title found" # Handle empty title tags
+            article_elem = medline_citation.find('.//Article')
+            if article_elem is not None:
+                # Title
+                article_title_elem = article_elem.find('.//ArticleTitle')
+                if article_title_elem is not None:
+                    data['ArticleTitle'] = ''.join(article_title_elem.itertext()).strip()
+                else:
+                    data['ArticleTitle'] = None # Ensure key exists even if missing
 
-            # Look for PubDate in multiple potential locations
-            pubdate_element = article.find(".//Article/Journal/JournalIssue/PubDate")
-            if pubdate_element is None:
-                 pubdate_element = article.find(".//Article/PubDate") # Check Article level too
-            year = extract_year(pubdate_element)
+                # Abstract
+                abstract_elem = article_elem.find('.//Abstract/AbstractText')
+                if abstract_elem is not None:
+                    data['Abstract'] = ''.join(abstract_elem.itertext()).strip()
+                else:
+                    abstract_texts = article_elem.findall('.//Abstract/AbstractText')
+                    if abstract_texts:
+                        abstract_parts = []
+                        for part in abstract_texts:
+                             label = part.get('Label')
+                             text = ''.join(part.itertext()).strip()
+                             if label:
+                                 abstract_parts.append(f"{label}: {text}")
+                             else:
+                                 abstract_parts.append(text)
+                        data['Abstract'] = "\n".join(abstract_parts)
+                    else:
+                        data['Abstract'] = "No abstract found" # Ensure key exists even if missing
 
-            # Handle structured abstracts correctly
-            abstract_parts = article.xpath(".//Abstract/AbstractText")
-            if abstract_parts:
-                processed_parts = []
-                for part in abstract_parts:
-                    # Get text content robustly
-                    part_text = ET.tostring(part, method='text', encoding='unicode').strip()
-                    label = part.get("Label")
-                    if label and part_text: # Only add label if text exists
-                        processed_parts.append(f"{label.upper()}: {part_text}")
-                    elif part_text: # Add part if text exists, even without label
-                        processed_parts.append(part_text)
-                if processed_parts:
-                    abstract_text = "\n".join(processed_parts) # Use newline as separator
-                # If after processing, it's empty, keep default "No abstract found"
-                if not abstract_text:
-                    abstract_text = "No abstract found"
 
-            results_list.append({
-                "PMID": pmid,
-                "Year": year,
-                "Title": title,
-                "Abstract": abstract_text
-            })
+                # Publication Date and YEAR
+                pub_date_elem = article_elem.find('.//Journal/JournalIssue/PubDate')
+                if pub_date_elem is not None:
+                    year = pub_date_elem.findtext('Year')
+                    month = pub_date_elem.findtext('Month')
+                    day = pub_date_elem.findtext('Day')
+                    medline_date = pub_date_elem.findtext('MedlineDate')
 
-        logging.info(f"Processed {articles_found_count} article structures found in efetch response.")
-        if articles_found_count < len(pmid_list):
-             logging.warning(f"Requested {len(pmid_list)} PMIDs, but received data structures for {articles_found_count}.")
-             # It's possible some PMIDs are invalid or suppressed
+                    # Store the full date string as PubDate (optional, but keeps original)
+                    if year:
+                        date_parts = [year]
+                        if month: date_parts.append(month)
+                        if day: date_parts.append(day)
+                        data['PubDate'] = "-".join(date_parts)
+                    elif medline_date:
+                         data['PubDate'] = medline_date
+                    else:
+                        data['PubDate'] = None
 
-    except requests.RequestException as e:
-        logging.error(f"Error during efetch request: {e}")
-        if results_list:
-            logging.warning("Returning partial results due to network error.")
-            # Convert partial results to DataFrame before returning
-            df = pd.DataFrame(results_list, columns=["PMID", "Year", "Title", "Abstract"])
-            log_missing_pmids(pmid_list, df)
-            return df
+                    # IMPORTANT: Extract and store the Year separately
+                    # Prioritize <Year>, fallback to parsing MedlineDate if needed (basic attempt)
+                    if year:
+                         data['Year'] = year
+                    elif medline_date:
+                         # Try to extract a 4-digit year from MedlineDate string
+                         year_match = re.search(r'\d{4}', medline_date)
+                         data['Year'] = year_match.group(0) if year_match else None
+                    else:
+                        data['Year'] = None # Ensure key exists even if missing
+                else:
+                    data['PubDate'] = None
+                    data['Year'] = None # Ensure key exists even if missing
+
+
+                # Authors (Example: just list names)
+                author_list_elem = article_elem.find('.//AuthorList')
+                authors = []
+                if author_list_elem is not None:
+                    for author_elem in author_list_elem.findall('.//Author'):
+                         last_name = author_elem.findtext('LastName')
+                         fore_name = author_elem.findtext('ForeName')
+                         initials = author_elem.findtext('Initials')
+                         name = f"{last_name or ''} {fore_name or ''}".strip()
+                         if not name and initials: # Fallback to initials if name parts missing
+                             name = initials.strip()
+                         if name:
+                             authors.append(name)
+                data['Authors'] = "; ".join(authors) if authors else None
+
+            # MeSH Terms (Example: list main headings)
+            mesh_list_elem = medline_citation.find('.//MeshHeadingList')
+            mesh_terms = []
+            if mesh_list_elem is not None:
+                for mesh_heading in mesh_list_elem.findall('.//MeshHeading'):
+                    descriptor = mesh_heading.find('.//DescriptorName')
+                    if descriptor is not None:
+                        mesh_terms.append(descriptor.text)
+            data['MeshTerms'] = "; ".join(mesh_terms) if mesh_terms else None
+
+
+        # Extract Publication Status from PubMedData if available
+        pubmed_data = article_xml.find('.//PubMedData')
+        if pubmed_data is not None:
+             pub_status_list = pubmed_data.findall('.//PublicationStatus')
+             if pub_status_list:
+                 data['PublicationStatus'] = "; ".join([status.text for status in pub_status_list if status.text])
+             else:
+                 data['PublicationStatus'] = None
         else:
-            return pd.DataFrame(columns=["PMID", "Year", "Title", "Abstract"])
-    except ET.XMLSyntaxError as e:
-        logging.error(f"Error parsing efetch XML response: {e}")
-        logging.error(f"Efetch response content (first 500 chars): {efetch_response.text[:500]}")
-        if results_list:
-             logging.warning("Returning partial results due to XML parsing error.")
-             df = pd.DataFrame(results_list, columns=["PMID", "Year", "Title", "Abstract"])
-             log_missing_pmids(pmid_list, df)
-             return df
-        else:
-             return pd.DataFrame(columns=["PMID", "Year", "Title", "Abstract"])
+            data['PublicationStatus'] = None
 
-    if results_list:
-        df = pd.DataFrame(results_list, columns=["PMID", "Year", "Title", "Abstract"])
-        log_missing_pmids(pmid_list, df) # Log missing PMIDs after successful parsing
-        logging.info(f"Successfully fetched and parsed data for {len(df)} PMIDs.")
+        # Add PMID even if other parsing fails
+        if 'PMID' not in data or data['PMID'] is None:
+             pmid_fallback_elem = article_xml.find('.//PMID')
+             if pmid_fallback_elem is not None:
+                  data['PMID'] = pmid_fallback_elem.text
+             else:
+                  data['PMID'] = None # Should log a critical error if PMID isn't found
+
+    except Exception as e:
+        pmid_val = data.get('PMID', 'Unknown PMID')
+        logging.error(f"Error parsing XML for PMID {pmid_val}: {e}", exc_info=False)
+        data['ParsingError'] = str(e) # Add error info
+
+    return data
+
+
+def _fetch_pubmed_batch(pmid_batch: List[str], api_key: Optional[str], email: str, attempt: int = 1) -> List[Dict[str, Any]]:
+    """
+    Fetches PubMed data for a batch of PMIDs using EFetch and parses the XML.
+    Includes retry logic.
+
+    Args:
+        pmid_batch: A list of PMID strings.
+        api_key: The NCBI API key.
+        email: The user's email.
+        attempt: Current retry attempt number.
+
+    Returns:
+        A list of dictionaries, where each dictionary contains data for a PubMed article.
+        Returns an empty list on failure after retries.
+    """
+    if not pmid_batch:
+        return []
+
+    pmids_str = ','.join(pmid_batch)
+    url = f"{EUTILS_BASE_URL}efetch.fcgi"
+    params = {
+        "db": "pubmed",
+        "id": pmids_str,
+        "retmode": "xml", # Fetch as XML for structured parsing
+        "api_key": api_key,
+        "email": email,
+    }
+
+    # Simple delay before request to be courteous
+    time.sleep(FETCH_DELAY_PER_BATCH)
+
+    try:
+        response = requests.get(url, params=params, timeout=FETCH_TIMEOUT)
+        response.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
+
+        # Check if response content is valid XML
+        if not response.content.strip().startswith(b'<'):
+             logging.warning(f"Batch starting {pmid_batch[0]}: Did not receive valid XML. Response status: {response.status_code}. Content start: {response.content.strip()[:100]}")
+             # Treat as a failure that might need retry, or just log and move on?
+             # For now, log and return empty list for this batch
+             return []
+
+        # Parse the XML
+        # EFetch XML for pubmed returns a single PubmedArticleSet containing multiple PubmedArticle elements
+        root = ET.fromstring(response.content)
+        parsed_data = []
+        for article_elem in root.findall('.//PubmedArticle'):
+            article_data = _parse_pubmed_article_xml(article_elem)
+            if article_data.get('PMID') is not None: # Only add if PMID was successfully identified
+                parsed_data.append(article_data)
+            else:
+                logging.warning(f"Failed to parse article XML without identifiable PMID in batch starting {pmid_batch[0]}.")
+
+        logging.debug(f"Successfully fetched and parsed batch starting {pmid_batch[0]}")
+        return parsed_data
+
+    except requests.exceptions.Timeout:
+        logging.warning(f"Batch starting {pmid_batch[0]}: Request timed out (attempt {attempt}).")
+        if attempt < FETCH_MAX_RETRIES:
+            wait_time = FETCH_BACKOFF_FACTOR * attempt
+            logging.warning(f"Retrying batch starting {pmid_batch[0]} after {wait_time}s.")
+            time.sleep(wait_time)
+            return _fetch_pubmed_batch(pmid_batch, api_key, email, attempt + 1)
+        else:
+            logging.error(f"Batch starting {pmid_batch[0]}: Max retries exceeded due to timeout.")
+            return []
+    except requests.exceptions.HTTPError as e:
+        status_code = e.response.status_code
+        logging.warning(f"Batch starting {pmid_batch[0]}: HTTP error {status_code} (attempt {attempt}).")
+        if status_code in {429, 500, 502, 503, 504} and attempt < FETCH_MAX_RETRIES:
+             wait_time = FETCH_BACKOFF_FACTOR * attempt
+             logging.warning(f"Retrying batch starting {pmid_batch[0]} after {wait_time}s.")
+             time.sleep(wait_time)
+             return _fetch_pubmed_batch(pmid_batch, api_key, email, attempt + 1)
+        else:
+            logging.error(f"Batch starting {pmid_batch[0]}: Non-retryable HTTP error {status_code} or max retries exceeded.")
+            logging.error(f"Response text: {e.response.text}")
+            return []
+    except requests.exceptions.RequestException as e:
+        logging.warning(f"Batch starting {pmid_batch[0]}: Request exception: {e} (attempt {attempt}).")
+        if attempt < FETCH_MAX_RETRIES:
+            wait_time = FETCH_BACKOFF_FACTOR * attempt
+            logging.warning(f"Retrying batch starting {pmid_batch[0]} after {wait_time}s.")
+            time.sleep(wait_time)
+            return _fetch_pubmed_batch(pmid_batch, api_key, email, attempt + 1)
+        else:
+            logging.error(f"Batch starting {pmid_batch[0]}: Max retries exceeded due to request exception.")
+            return []
+    except ET.ParseError as e:
+         logging.error(f"Batch starting {pmid_batch[0]}: Failed to parse XML: {e}", exc_info=False)
+         return []
+    except Exception as e:
+        logging.error(f"Batch starting {pmid_batch[0]}: An unexpected error occurred during fetch/parse: {e}", exc_info=False)
+        return []
+
+
+def get_pubmed_data_bulk(pmids: List[str], api_key: Optional[str]) -> pd.DataFrame:
+    """
+    Fetches PubMed data for a list of PMIDs in batches using multiple threads.
+
+    Args:
+        pmids: A list of PMID strings.
+        api_key: The NCBI API key.
+
+    Returns:
+        A pandas DataFrame containing the fetched and partially parsed data.
+        Returns an empty DataFrame if no data is fetched.
+    """
+    if not pmids:
+        logging.info("No PMIDs provided for bulk fetching.")
+        return pd.DataFrame()
+
+    # Ensure PMIDs are strings
+    pmids = [str(p) for p in pmids]
+
+    logging.info(f"Starting bulk fetch for {len(pmids)} PMIDs in batches of {FETCH_BATCH_SIZE} using {FETCH_MAX_WORKERS} workers.")
+
+    pmid_batches = [pmids[i:i + FETCH_BATCH_SIZE] for i in range(0, len(pmids), FETCH_BATCH_SIZE)]
+    all_articles_data: List[Dict[str, Any]] = []
+    futures = []
+
+    with ThreadPoolExecutor(max_workers=FETCH_MAX_WORKERS) as executor:
+        for batch in pmid_batches:
+            futures.append(executor.submit(_fetch_pubmed_batch, batch, api_key, NCBI_EMAIL))
+
+        # Use tqdm to show progress of completed futures
+        for future in tqdm(as_completed(futures), total=len(futures), desc="Fetching PubMed batches"):
+            try:
+                batch_results = future.result()
+                if batch_results:
+                    all_articles_data.extend(batch_results)
+            except Exception as exc:
+                # This catches exceptions that occurred during the execution of _fetch_pubmed_batch
+                # that weren't already handled and logged within _fetch_pubmed_batch itself.
+                logging.error(f'Batch processing generated an exception: {exc}', exc_info=False)
+
+    if not all_articles_data:
+        logging.warning("No PubMed data was successfully fetched for any PMID batch.")
+        return pd.DataFrame()
+
+    # Create DataFrame from the collected data
+    # The columns will be the union of all keys found in the dictionaries
+    raw_df = pd.DataFrame(all_articles_data)
+
+    # Ensure PMID column exists and is the first column for clarity
+    if 'PMID' in raw_df.columns:
+         # Reorder columns to put PMID first
+         cols = raw_df.columns.tolist()
+         cols.remove('PMID')
+         raw_df = raw_df[['PMID'] + cols]
     else:
-        logging.warning("Efetch successful, but no article data could be extracted.")
-        df = pd.DataFrame(columns=["PMID", "Year", "Title", "Abstract"])
+         logging.warning("PMID column not found in fetched data after parsing.")
 
-    return df
+
+    logging.info(f"Finished bulk fetch. Successfully processed data for {len(raw_df)} articles.")
+    # Note: len(raw_df) might be less than len(pmids) due to failed fetches or parsing errors
+
+    return raw_df
 
 def log_missing_pmids(requested_pmids: List[str], result_df: pd.DataFrame):
     """Helper function to log which requested PMIDs were not found in the results."""
@@ -208,34 +341,77 @@ def log_missing_pmids(requested_pmids: List[str], result_df: pd.DataFrame):
     if missing_pmids:
         logging.warning(f"Data for the following PMIDs was not found in the response: {', '.join(missing_pmids)}")
 
-def transform_pubmed_data(input_df: pd.DataFrame) -> pd.DataFrame:
+def transform_pubmed_data(raw_df: pd.DataFrame) -> pd.DataFrame:
     """
-    Transforms the raw PubMed data DataFrame by creating a 'text' column.
+    Transforms the raw PubMed DataFrame by creating a 'text' column
+    and selecting/renaming columns for the final output.
 
     Args:
-        input_df: DataFrame with 'PMID', 'Year', 'Title', 'Abstract' columns.
+        raw_df: DataFrame containing raw fetched and parsed data
+                (expected columns: 'PMID', 'Year', 'ArticleTitle', 'Abstract').
 
     Returns:
-        DataFrame with 'PMID', 'Year', 'text' columns.
+        DataFrame with 'PMID', 'Year', 'text' columns (or others as defined).
     """
-    if input_df.empty:
-        logging.warning("Input DataFrame for transformation is empty.")
-        return pd.DataFrame(columns=['PMID', 'Year', 'text'])
-
-    logging.info("Transforming fetched data...")
+    logging.info("Starting data transformation...")
     start_transform_time = time.time()
 
+    if raw_df.empty:
+        logging.warning("Raw DataFrame for transformation is empty.")
+        # Return an empty DataFrame with the *expected* final columns
+        return pd.DataFrame(columns=['PMID', 'Year', 'text'])
+
+    # Check if essential columns exist, add them if not (e.g., due to total parsing failure)
+    required_cols = ['PMID', 'Year', 'ArticleTitle', 'Abstract']
+    for col in required_cols:
+        if col not in raw_df.columns:
+            logging.warning(f"Column '{col}' missing in raw data. Adding with None values.")
+            raw_df[col] = None
+
     # Ensure Title and Abstract are strings before concatenation
-    input_df['Title'] = input_df['Title'].astype(str)
-    input_df['Abstract'] = input_df['Abstract'].astype(str)
+    # Use .fillna('') to safely handle missing or None values
+    raw_df['ArticleTitle'] = raw_df['ArticleTitle'].fillna('').astype(str)
+    raw_df['Abstract'] = raw_df['Abstract'].fillna('').astype(str)
 
-    # Corrected "Tittle" to "Title"
-    input_df['text'] = ("# Title: " + input_df['Title'] +
-                        "\n# Abstract: " + input_df['Abstract'])
+    # Create the 'text' column using the correct column names
+    # Corrected "Tittle" to "Title" here
+    raw_df['text'] = ("# Title: " + raw_df['ArticleTitle'] +
+                      "\n# Abstract: " + raw_df['Abstract'])
 
-    # Select and reorder final columns, using .copy() to avoid warnings
-    final_df = input_df[['PMID', 'Year', 'text']].copy()
+    # Ensure Year is string/object type for consistent output if mixed types occurred
+    raw_df['Year'] = raw_df['Year'].astype(str).replace('None', pd.NA) # Replace 'None' string with actual NA
+
+    # Select and reorder final columns
+    # Use .copy() to avoid potential SettingWithCopyWarning
+    final_columns = ['PMID', 'Year', 'text']
+
+    # Ensure selected columns exist in the DataFrame before selecting
+    # (Handles cases where even PMID might be missing from raw_df somehow)
+    cols_to_select = [col for col in final_columns if col in raw_df.columns]
+
+    # If essential columns are missing, this might result in an empty or partial df
+    if not all(col in raw_df.columns for col in final_columns):
+         logging.warning("Some final columns ('PMID', 'Year', 'text') missing after transformation steps.")
+         # Decide how to handle: proceed with available, or return empty?
+         # Let's proceed, but log columns present
+         logging.warning(f"Columns available for final selection: {raw_df.columns.tolist()}")
+
+
+    # Select the columns, ensuring 'PMID', 'Year', 'text' are present if possible
+    # Use a robust selection method
+    output_df = pd.DataFrame()
+    if 'PMID' in raw_df.columns and 'Year' in raw_df.columns and 'text' in raw_df.columns:
+         output_df = raw_df[['PMID', 'Year', 'text']].copy()
+    else:
+         logging.error("Could not create final DataFrame with 'PMID', 'Year', 'text' columns.")
+         # Fallback: try to include any of these that exist
+         fallback_cols = [col for col in ['PMID', 'Year', 'text'] if col in raw_df.columns]
+         if fallback_cols:
+              output_df = raw_df[fallback_cols].copy()
+         else:
+              output_df = pd.DataFrame(columns=['PMID', 'Year', 'text']) # Return empty with correct columns
+
 
     end_transform_time = time.time()
     logging.info(f"Transformation complete in {end_transform_time - start_transform_time:.2f} seconds.")
-    return final_df
+    return output_df
