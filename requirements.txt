@@ -11,3 +11,4 @@ vllm
 datasets
 dotenv
 google-genai
+langchain_google_vertexai

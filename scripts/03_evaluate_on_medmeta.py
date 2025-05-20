@@ -373,11 +373,20 @@ def main(eval_file: str, output_file: str, max_rows: Optional[int], wait_time: i
             if 'Num Target' in df_results.columns and 'Num Missing' in df_results.columns:
                 # Ensure division by zero is handled if Num Target is 0
                 df_results['Recall@NumRetrieved'] = df_results.apply(
-                    lambda r: (r['Num Target'] - r['Num Missing']) / r['Num Target'] if r['Num Target'] > 0 else (1.0 if r['Num Missing'] == 0 else 0.0),
+                    lambda r: (r['Num Target'] - r['Num Missing']) / r['Num Target'] if r['Num Target'] > 0 else (1.0 if r['Num Missing'] == 0 and r['Num Target'] == 0 else 0.0),
                     axis=1
                 )
                 avg_recall = df_results['Recall@NumRetrieved'].mean()
                 print(f"Average Recall@(Num Retrieved): {avg_recall:.4f}") # Recall over all retrieved docs
+
+                # Calculate Precision@(Num Retrieved)
+                df_results['Precision@NumRetrieved'] = df_results.apply(
+                    lambda r: (r['Num Target'] - r['Num Missing']) / r['Num Retrieved'] if r['Num Retrieved'] > 0 else 0.0,
+                    axis=1
+                )
+                avg_precision = df_results['Precision@NumRetrieved'].mean()
+                print(f"Average Precision@(Num Retrieved): {avg_precision:.4f}")
+
                 print(f"Total Missing PMIDs across all rows: {df_results['Num Missing'].sum()}")
 
 
