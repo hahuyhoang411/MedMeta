@@ -10,3 +10,4 @@ litellm
 vllm
 datasets
 dotenv
+google-genai
