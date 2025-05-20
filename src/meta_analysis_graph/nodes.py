@@ -5,9 +5,14 @@ from langchain.retrievers import ContextualCompressionRetriever
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.documents import Document
 
-from .state_models import MetaAnalysisState, ResearchPlan, SearchQueries # Relative import
+from .state_models import MetaAnalysisState, ResearchPlan, SearchQueries, LLMAnsweredQuestion
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# Placeholder for structured LLM answers - consider moving to state_models.py
+# class LLMAnsweredQuestion(TypedDict):
+#     question: str # The original key research question
+#     comprehensive_answer: str # LLM's detailed answer, potentially including sub-questions and their answers
 
 def generate_research_plan(state: MetaAnalysisState, llm: BaseChatModel) -> Dict[str, Any]:
     """
@@ -90,48 +95,113 @@ def retrieve_documents(state: MetaAnalysisState, retriever: ContextualCompressio
         return {"retrieved_docs": []} # Return empty list on error
 
 
+def answer_questions_with_llm(state: MetaAnalysisState, llm: BaseChatModel) -> Dict[str, Any]:
+    """
+    Uses the LLM's internal knowledge to answer the key research questions.
+    The LLM is prompted to also generate and answer sub-questions if relevant.
+    """
+    logging.info("--- Node: answer_questions_with_llm ---")
+    plan = state.get('research_plan')
+
+    if not plan or not isinstance(plan, ResearchPlan) or not plan.key_questions:
+        logging.error("Research plan or key questions missing. Cannot answer questions with LLM.")
+        return {"llm_generated_answers": []}
+
+    answered_questions: List[LLMAnsweredQuestion] = []
+
+    for question in plan.key_questions:
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", "You are an expert researcher with broad knowledge. For the given research question, provide a comprehensive answer based on your internal knowledge. If applicable, identify 2-3 critical sub-questions that arise from this main question and provide detailed answers to those as well within your response. Structure your entire response as a single coherent text."),
+            ("human", "Research Question: {question}")
+        ])
+        try:
+            answer_chain = prompt | llm
+            response = answer_chain.invoke({"question": question})
+            answered_questions.append({
+                "question": question,
+                "comprehensive_answer": response.content
+            })
+            logging.info(f"LLM answered question: '{question}'")
+        except Exception as e:
+            logging.error(f"Error answering question '{question}' with LLM: {e}", exc_info=True)
+            answered_questions.append({
+                "question": question,
+                "comprehensive_answer": f"Error generating answer for this question: {e}"
+            })
+
+    return {"llm_generated_answers": answered_questions}
+
+
 def synthesize_conclusion(state: MetaAnalysisState, llm: BaseChatModel) -> Dict[str, Any]:
     """
-    Synthesizes a final conclusion from all aggregated retrieved documents.
+    Synthesizes a final conclusion.
+    If 'use_internal_knowledge' is True in state, it uses LLM-generated answers.
+    Otherwise, it uses aggregated retrieved documents.
     """
     logging.info("--- Node: synthesize_conclusion ---")
     topic = state['research_topic']
     plan = state.get('research_plan')
-    retrieved_docs = state.get('retrieved_docs', []) # Aggregated docs
+    use_internal_knowledge = state.get('use_internal_knowledge', False)
 
-    # De-duplicate documents based on page content (simple approach)
-    seen_content = set()
-    unique_docs = []
-    for doc in retrieved_docs:
-        if doc.page_content not in seen_content:
-            unique_docs.append(doc)
-            seen_content.add(doc.page_content)
-
-    logging.info(f"Aggregated {len(retrieved_docs)} docs, reduced to {len(unique_docs)} unique docs for synthesis.")
-
-    if not unique_docs:
-        logging.warning("No unique documents found to synthesize a conclusion.")
-        return {"final_conclusion": "No relevant documents were found or retrieved to synthesize a conclusion."}
-
-    if not plan or not isinstance(plan, ResearchPlan) or not plan.key_questions:
-        logging.warning("Research plan or key questions missing for synthesis context. Proceeding without them.")
-        key_questions_str = "N/A"
-    else:
+    key_questions_str = "N/A"
+    if plan and isinstance(plan, ResearchPlan) and plan.key_questions:
         key_questions_str = "\n".join(f"- {q}" for q in plan.key_questions)
+    else:
+        logging.warning("Research plan or key questions missing for synthesis context. Proceeding without them.")
 
+    context_string = ""
+    synthesis_input_type = ""
 
-    # Limit context size if necessary, although Gemini Flash has large context
-    # Consider summarizing long docs or selecting top passages if context exceeds limits
-    context_string = "\n\n---\n\n".join(
-        [f"Source PMID: {doc.metadata.get('PMID', 'N/A')}\nYear: {doc.metadata.get('Year', 'N/A')}\nContent:\n{doc.page_content}"
-         for doc in unique_docs[:50]] # Limit context to first 50 unique docs for safety
+    if use_internal_knowledge:
+        logging.info("Synthesizing conclusion from LLM-generated answers.")
+        llm_answers = state.get('llm_generated_answers', [])
+        if not llm_answers:
+            logging.warning("No LLM-generated answers found to synthesize a conclusion.")
+            return {"final_conclusion": "No LLM-generated answers were available to synthesize a conclusion."}
+
+        context_string = "\n\n---\n\n".join(
+            [f"Question: {ans['question']}\nAnswer:\n{ans['comprehensive_answer']}"
+             for ans in llm_answers]
         )
+        synthesis_input_type = "LLM-Generated Answers to Research Questions"
+    else:
+        logging.info("Synthesizing conclusion from retrieved documents.")
+        retrieved_docs = state.get('retrieved_docs', [])
+        seen_content = set()
+        unique_docs = []
+        for doc in retrieved_docs:
+            if doc.page_content not in seen_content:
+                unique_docs.append(doc)
+                seen_content.add(doc.page_content)
+        logging.info(f"Aggregated {len(retrieved_docs)} docs, reduced to {len(unique_docs)} unique docs for synthesis.")
 
+        if not unique_docs:
+            logging.warning("No unique documents found to synthesize a conclusion.")
+            return {"final_conclusion": "No relevant documents were found or retrieved to synthesize a conclusion."}
+
+        # Limit context size if necessary
+        context_string = "\n\n---\n\n".join(
+            [f"Source PMID: {doc.metadata.get('PMID', 'N/A')}\nYear: {doc.metadata.get('Year', 'N/A')}\nContent:\n{doc.page_content}"
+             for doc in unique_docs[:50]] # Limit context to first 50 unique docs for safety
+        )
+        synthesis_input_type = "Retrieved Study Context"
+
+    prompt_template_str = (
+        "You are a research analyst tasked with creating the final concluding summary for a meta-analysis or systematic review. "
+        "Based *only* on the provided context, synthesize a concise wrap-up conclusion. "
+        "This conclusion should address the key research questions (if available), identify major themes, consistent findings, discrepancies, or gaps mentioned. "
+        "Frame your response as a final summary of the evidence or information presented in the context. Do not add external knowledge."
+        "\n\nResearch Topic: {topic}"
+        "\n\nResearch Plan Key Questions:\n{key_questions}"
+        f"\n\n{synthesis_input_type}:\n{{context}}"
+        "\n\nSynthesize a concise conclusion based *only* on the provided context:"
+    )
 
     prompt = ChatPromptTemplate.from_messages([
-        ("system", "You are a research analyst tasked with creating the final concluding summary for a meta-analysis or systematic review. Based *only* on the provided context from retrieved studies, synthesize a concise wrap-up conclusion. This conclusion should address the key research questions (if available), identify major themes, consistent findings, discrepancies, or gaps mentioned across the studies. Frame your response as a final summary of the evidence presented in the context. Do not add external knowledge."),
-        ("human", "Research Topic: {topic}\n\nResearch Plan Key Questions:\n{key_questions}\n\nRetrieved Study Context:\n{context}\n\nSynthesize a concise conclusion based *only* on the provided context:")
+        ("system", prompt_template_str.split("\n\nResearch Topic:")[0].strip()), # System part
+        ("human", "\nResearch Topic: {topic}" + prompt_template_str.split("\nResearch Topic: {topic}", 1)[1]) # Human part
     ])
+
 
     try:
         synthesis_chain = prompt | llm

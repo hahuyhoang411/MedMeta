@@ -12,7 +12,8 @@ from .nodes import (
     generate_research_plan,
     generate_search_queries,
     retrieve_documents,
-    synthesize_conclusion
+    synthesize_conclusion,
+    answer_questions_with_llm
 )
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -29,18 +30,28 @@ def route_to_retrieval(state: MetaAnalysisState) -> List[Send]:
     if not valid_queries:
          logging.warning("No valid search queries generated or found in state. Routing to synthesis.")
          # If no queries, the list of Send actions is empty, graph proceeds to the join point (synthesis)
-         return [] # Empty list signifies moving to the node that waits for all branches (synthesize)
+         # This will now effectively mean skipping retrieval and going to synthesis, which is fine.
+         # If use_internal_knowledge was false, synthesis will report no docs.
+         return []
 
     logging.info(f"Routing {len(valid_queries)} search queries to retrieval node.")
-    # Create a Send action for each valid query.
-    # The dictionary passed is the *update* to the state for that specific branch.
-    # We set 'current_query' for the retrieve_documents node to use.
     send_actions = [
         Send("retrieve_documents", {"current_query": query})
         for query in valid_queries
     ]
     return send_actions
 
+def decide_knowledge_path(state: MetaAnalysisState) -> str:
+    """
+    Decides whether to use LLM internal knowledge or proceed with document retrieval.
+    """
+    logging.info("--- Router: decide_knowledge_path ---")
+    if state.get("use_internal_knowledge"):
+        logging.info("Path chosen: Use LLM internal knowledge.")
+        return "answer_questions_with_llm"
+    else:
+        logging.info("Path chosen: Retrieve documents.")
+        return "generate_search_queries"
 
 # --- Build the Graph ---
 
@@ -55,8 +66,8 @@ def build_graph(llm: BaseChatModel, retriever: ContextualCompressionRetriever) -
     Returns:
         The compiled LangGraph application, or None if build fails.
     """
-    if not llm or not retriever:
-        logging.error("LLM or Retriever instance is missing. Cannot build graph.")
+    if not llm: # Retriever is only needed for one path
+        logging.error("LLM instance is missing. Cannot build graph.")
         return None
 
     try:
@@ -65,26 +76,56 @@ def build_graph(llm: BaseChatModel, retriever: ContextualCompressionRetriever) -
         # Add nodes, binding the LLM and retriever where needed
         graph_builder.add_node("generate_research_plan", lambda state: generate_research_plan(state, llm))
         graph_builder.add_node("generate_search_queries", lambda state: generate_search_queries(state, llm))
+        # Retriever is only passed to retrieve_documents
         graph_builder.add_node("retrieve_documents", lambda state: retrieve_documents(state, retriever))
+        graph_builder.add_node("answer_questions_with_llm", lambda state: answer_questions_with_llm(state, llm))
         graph_builder.add_node("synthesize_conclusion", lambda state: synthesize_conclusion(state, llm))
 
         # Define edges
         graph_builder.add_edge(START, "generate_research_plan")
-        graph_builder.add_edge("generate_research_plan", "generate_search_queries")
 
-        # Conditional edge: After query generation, fan out to retrieve for each query
+        # Conditional edge: After research plan, decide which knowledge path to take
+        graph_builder.add_conditional_edges(
+            "generate_research_plan",
+            decide_knowledge_path,
+            {
+                "generate_search_queries": "generate_search_queries",
+                "answer_questions_with_llm": "answer_questions_with_llm"
+            }
+        )
+
+        # Path 1: Document Retrieval
         graph_builder.add_conditional_edges(
             "generate_search_queries",
             route_to_retrieval,
-            # The key "" indicates that the next step depends *only* on the routing logic result
-            # If route_to_retrieval returns [], it implicitly goes to the node that joins the branches.
-            # If it returns Send actions, those branches execute.
-        )
+            # If route_to_retrieval returns an empty list (no queries),
+            # LangGraph needs a way to proceed. We want it to go to synthesis.
+            # An empty list from route_to_retrieval means no Send actions are dispatched.
+            # The graph will then look for a direct edge from 'generate_search_queries'
+            # if no 'Send' actions are created or if all 'Send' paths complete.
+            # To handle the "no valid queries" case from route_to_retrieval where it returns [],
+            # and to ensure it correctly proceeds to synthesis, we can add a direct edge
+            # for the case when no branches are taken.
+            # However, LangGraph typically joins implicitly.
+            # If route_to_retrieval returns [], it means no branches for 'retrieve_documents' are spawned.
+            # The graph then needs to know where to go from 'generate_search_queries'.
+            # The current setup of add_conditional_edges for route_to_retrieval
+            # implicitly handles the "no branches" case by moving to the join point
+            # for any 'Send' actions, or if none, it waits for an explicit next step from this node.
+            # Let's ensure 'retrieve_documents' always leads to 'synthesize_conclusion'.
+            # And if 'retrieve_documents' is skipped, 'generate_search_queries' should also lead to 'synthesize_conclusion'.
 
-        # After all retrieval branches complete (implicitly handled by LangGraph),
-        # proceed to synthesis. The 'retrieve_documents' node outputs to 'retrieved_docs',
-        # which are automatically aggregated by the `operator.add` annotation in the state.
+            # If 'route_to_retrieval' dispatches 'Send' actions to 'retrieve_documents', then 'retrieve_documents'
+            # will eventually lead to 'synthesize_conclusion'.
+            # If 'route_to_retrieval' returns [], meaning no queries to dispatch,
+            # 'generate_search_queries' node effectively finishes. We need to connect it to 'synthesize_conclusion'.
+             {"__END__": "synthesize_conclusion"} # If no Send actions, go to synthesize_conclusion
+        )
         graph_builder.add_edge("retrieve_documents", "synthesize_conclusion")
+
+
+        # Path 2: LLM Internal Knowledge
+        graph_builder.add_edge("answer_questions_with_llm", "synthesize_conclusion")
 
         # Final step
         graph_builder.add_edge("synthesize_conclusion", END)

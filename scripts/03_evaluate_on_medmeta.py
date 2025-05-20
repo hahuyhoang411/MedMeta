@@ -182,7 +182,7 @@ def setup_pipeline():
     logging.info("--- Pipeline Setup Complete ---")
     return app
 
-def main(eval_file: str, output_file: str, max_rows: Optional[int], wait_time: int):
+def main(eval_file: str, output_file: str, max_rows: Optional[int], wait_time: int, use_llm_knowledge: bool):
     """
     Main function to run evaluation on the MedMeta dataset.
 
@@ -191,10 +191,13 @@ def main(eval_file: str, output_file: str, max_rows: Optional[int], wait_time: i
         output_file: Path to save the evaluation results CSV.
         max_rows: Maximum number of rows to process from eval_file (None for all).
         wait_time: Seconds to wait between processing rows (for API rate limits).
+        use_llm_knowledge: Whether to use the LLM's internal knowledge path.
     """
     eval_start_time = time.time()
     k_value = RETRIEVER_CONFIG.get('COMPRESSION_TOP_N', 5) # Define K for metrics
     logging.info(f"Calculating metrics using k={k_value}")
+    if use_llm_knowledge:
+        logging.info("Evaluation mode: Using LLM internal knowledge. Retrieval metrics will be skipped/defaulted.")
 
     # --- Setup the Pipeline ---
     try:
@@ -265,7 +268,7 @@ def main(eval_file: str, output_file: str, max_rows: Optional[int], wait_time: i
             target_pmids = parse_pmids_from_string(references_str)
             logging.info(f"Parsed Target PMIDs: {target_pmids if target_pmids else 'None'}")
 
-            inputs = {"research_topic": query}
+            inputs = {"research_topic": query, "use_internal_knowledge": use_llm_knowledge}
             try:
                 logging.info("Invoking RAG application...")
                 # Use invoke for simplicity in evaluation loop
@@ -274,35 +277,37 @@ def main(eval_file: str, output_file: str, max_rows: Optional[int], wait_time: i
 
                 if final_state:
                     generated_conclusion = final_state.get('final_conclusion', "Conclusion not found in RAG output")
-                    # Extract retrieved docs - handle potential variation in state structure
-                    retrieved_docs_list = final_state.get('retrieved_docs', []) # Assign here
+                    
+                    if use_llm_knowledge:
+                        logging.info("LLM knowledge path taken. Skipping retrieval-based metrics calculation.")
+                        llm_answers = final_state.get('llm_generated_answers', [])
+                        logging.info(f"LLM Generated Answers: {llm_answers if llm_answers else 'N/A'}")
+                        # Metrics will remain at their default (0 or empty list)
+                        # Missing PMIDs will be all target PMIDs if any
+                        missing_pmids_list = sorted(list(target_pmids)) if target_pmids else []
+                    else:
+                        # Extract retrieved docs - handle potential variation in state structure
+                        retrieved_docs_list = final_state.get('retrieved_docs', []) # Assign here
+                        logging.info(f"Retrieved {len(retrieved_docs_list)} documents.")
 
-                    logging.info(f"Retrieved {len(retrieved_docs_list)} documents.")
+                        # Get ORDERED retrieved PMIDs - Assign here
+                        ordered_retrieved_pmids = get_ordered_retrieved_pmids(retrieved_docs_list)
+                        logging.info(f"Retrieved PMIDs (ordered): {ordered_retrieved_pmids if ordered_retrieved_pmids else 'None'}")
 
-                    # Get ORDERED retrieved PMIDs - Assign here
-                    ordered_retrieved_pmids = get_ordered_retrieved_pmids(retrieved_docs_list)
-                    logging.info(f"Retrieved PMIDs (ordered): {ordered_retrieved_pmids if ordered_retrieved_pmids else 'None'}")
+                        # Calculate metrics - Assign here
+                        hit_at_k = calculate_hit_at_k(ordered_retrieved_pmids, target_pmids, k_value)
+                        ap_at_k = calculate_average_precision_at_k(ordered_retrieved_pmids, target_pmids, k_value)
+                        all_hit_at_k.append(hit_at_k)
+                        all_ap_at_k.append(ap_at_k)
+                        logging.info(f"Metrics for this row: Hit@{k_value}={hit_at_k}, AP@{k_value}={ap_at_k:.3f}")
 
-                    # Calculate metrics - Assign here
-                    hit_at_k = calculate_hit_at_k(ordered_retrieved_pmids, target_pmids, k_value)
-                    ap_at_k = calculate_average_precision_at_k(ordered_retrieved_pmids, target_pmids, k_value)
-                    all_hit_at_k.append(hit_at_k)
-                    all_ap_at_k.append(ap_at_k)
-                    logging.info(f"Metrics for this row: Hit@{k_value}={hit_at_k}, AP@{k_value}={ap_at_k:.3f}")
-
-
-                    if target_pmids:
-                        # Fix TypeError: Convert list to set for difference operation
-                        missing_pmids_set = target_pmids - set(ordered_retrieved_pmids)
-                        missing_pmids_list = sorted(list(missing_pmids_set))
-                    # else: missing_pmids_list = [] # Already initialized
-
-                    logging.info(f"Missing PMIDs: {missing_pmids_list if missing_pmids_list else 'None'}")
-
+                        if target_pmids:
+                            missing_pmids_set = target_pmids - set(ordered_retrieved_pmids)
+                            missing_pmids_list = sorted(list(missing_pmids_set))
+                        logging.info(f"Missing PMIDs: {missing_pmids_list if missing_pmids_list else 'None'}")
                 else:
                      generated_conclusion = "Error: RAG invocation returned None"
                      logging.error("RAG invocation returned None state.")
-                     # Ensure missing PMIDs are calculated even if final_state is None but target_pmids exist
                      missing_pmids_list = sorted(list(target_pmids)) if target_pmids else []
 
 
@@ -327,10 +332,14 @@ def main(eval_file: str, output_file: str, max_rows: Optional[int], wait_time: i
             f'Hit@{k_value}': hit_at_k, # Store per-row metric
             f'AP@{k_value}': ap_at_k,   # Store per-row metric
         }
-        # Optionally add details from final_state if needed (e.g., generated plan, queries)
+        # Optionally add details from final_state if needed
         if final_state:
              result_row['Generated Plan'] = str(final_state.get('research_plan', 'N/A'))
-             result_row['Generated Queries'] = str(final_state.get('search_queries', 'N/A'))
+             if use_llm_knowledge:
+                 result_row['LLM Generated Answers'] = str(final_state.get('llm_generated_answers', 'N/A'))
+                 result_row['Generated Queries'] = 'N/A (LLM Knowledge Path)' # Queries not generated in this path
+             else:
+                 result_row['Generated Queries'] = str(final_state.get('search_queries', 'N/A'))
 
         results_list.append(result_row)
 
@@ -357,20 +366,20 @@ def main(eval_file: str, output_file: str, max_rows: Optional[int], wait_time: i
                 print(df_results.head())
             print("\n--- Evaluation Summary (k={k_value}) ---")
             # Calculate overall metrics
-            if all_ap_at_k:
+            if all_ap_at_k: # Only meaningful if not use_llm_knowledge for all rows
                 map_at_k = np.mean(all_ap_at_k)
                 print(f"MAP@{k_value}: {map_at_k:.4f}")
             else:
-                print(f"MAP@{k_value}: N/A (No results)")
+                print(f"MAP@{k_value}: N/A (No results or LLM knowledge path used exclusively)")
 
-            if all_hit_at_k:
+            if all_hit_at_k: # Only meaningful if not use_llm_knowledge for all rows
                 hit_rate_at_k = np.mean(all_hit_at_k)
                 print(f"Hit Rate@{k_value}: {hit_rate_at_k:.4f}")
             else:
-                 print(f"Hit Rate@{k_value}: N/A (No results)")
+                 print(f"Hit Rate@{k_value}: N/A (No results or LLM knowledge path used exclusively)")
 
-            # Keep existing recall calculation if desired
-            if 'Num Target' in df_results.columns and 'Num Missing' in df_results.columns:
+            # Keep existing recall calculation if desired, also conditional
+            if not use_llm_knowledge and 'Num Target' in df_results.columns and 'Num Missing' in df_results.columns:
                 # Ensure division by zero is handled if Num Target is 0
                 df_results['Recall@NumRetrieved'] = df_results.apply(
                     lambda r: (r['Num Target'] - r['Num Missing']) / r['Num Target'] if r['Num Target'] > 0 else (1.0 if r['Num Missing'] == 0 and r['Num Target'] == 0 else 0.0),
@@ -429,16 +438,28 @@ if __name__ == "__main__":
         default=EVAL_WAIT_SECONDS, # Use default from config
         help="Seconds to wait between processing rows (for API rate limits)."
     )
+    parser.add_argument(
+        "--use_llm_knowledge",
+        action='store_true', # Makes it a boolean flag
+        help="Use LLM's internal knowledge instead of document retrieval. Retrieval metrics will be skipped."
+    )
 
     args = parser.parse_args()
+
+    # Update k_value if provided by CLI argument
+    # This part of your original script seems to be missing the actual update of k_value from args.k_metrics
+    # For now, k_value is taken from RETRIEVER_CONFIG. COMPRESSION_TOP_N
+    # If you intended args.k_metrics to override it, that logic should be added.
 
     main(
         eval_file=args.eval_file,
         output_file=args.output,
         max_rows=args.max_rows,
-        wait_time=args.wait
+        wait_time=args.wait,
+        use_llm_knowledge=args.use_llm_knowledge # Pass the new argument
     )
 
     # Example Usage:
     # python scripts/03_evaluate_on_medmeta.py
     # python scripts/03_evaluate_on_medmeta.py --max_rows 5 --wait 5
+    # python scripts/03_evaluate_on_medmeta.py --max_rows 5 --wait 5 --use_llm_knowledge
