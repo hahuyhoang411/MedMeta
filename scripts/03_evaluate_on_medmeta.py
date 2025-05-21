@@ -148,48 +148,76 @@ def setup_pipeline(synthesis_mode: str):
     logging.info(f"Using device: {DEVICE}")
     logging.info(f"Selected synthesis mode: {synthesis_mode}")
 
-    # --- 1. Load and Prepare Data (Conditional) ---
     compression_retriever: Optional[ContextualCompressionRetriever] = None
+    reference_texts_df: Optional[pd.DataFrame] = None
+
     if synthesis_mode == "retrieval":
         logging.info("Retrieval mode selected. Setting up RAG dataset and retriever.")
-        ref_dataset = load_local_csv_dataset(FETCHED_DATA_CSV_PATH)
-        if ref_dataset is None: raise RuntimeError("Failed to load reference dataset.")
+        ref_dataset_docs = load_local_csv_dataset(FETCHED_DATA_CSV_PATH) # This loads the CSV for documents
+        if ref_dataset_docs is None: raise RuntimeError("Failed to load reference dataset for RAG.")
+        # Convert Hugging Face dataset to DataFrame for consistency if needed, or assume load_local_csv_dataset returns DataFrame
+        # For RAG, it's processed into LangChain docs.
 
         processed_pubmed_dataset = load_and_process_pubmed25(
             dataset_name=PUBMED25_DATASET_NAME, split=PUBMED25_SPLIT, cache_dir=CACHE_DIR
         )
-        datasets_to_combine = [ref_dataset]
+        datasets_to_combine = [ref_dataset_docs]
         if processed_pubmed_dataset and len(processed_pubmed_dataset) > 0:
             small_pubmed_subset = processed_pubmed_dataset.select(range(min(PUBMED25_SUBSET_SIZE, len(processed_pubmed_dataset))))
             datasets_to_combine.append(small_pubmed_subset)
+        
         rag_dataset = concatenate_hf_datasets(datasets_to_combine)
-        if rag_dataset is None: raise RuntimeError("Failed to create combined dataset.")
+        if rag_dataset is None: raise RuntimeError("Failed to create combined dataset for RAG.")
         logging.info(f"RAG dataset ready with {len(rag_dataset)} documents.")
 
-        # --- 2. Load LangChain Docs (Conditional) ---
-        loader = CustomHuggingFaceDatasetLoader(rag_dataset, metadata_columns=["PMID", "Year"])
+        loader = CustomHuggingFaceDatasetLoader(rag_dataset, metadata_columns=["PMID", "Year"], page_content_column="text") # Ensure 'text' is page content
         docs = loader.load()
-        if not docs: raise RuntimeError("No documents loaded into LangChain format.")
-        logging.info(f"Loaded {len(docs)} LangChain documents.")
+        if not docs: raise RuntimeError("No documents loaded into LangChain format for RAG.")
+        logging.info(f"Loaded {len(docs)} LangChain documents for RAG.")
 
-        # --- 3. Setup Retrievers (Conditional) ---
         compression_retriever = setup_retrieval_chain(docs, config=RETRIEVER_CONFIG, device=DEVICE)
         if compression_retriever is None: raise RuntimeError("Failed to setup retrieval chain for document retrieval path.")
-    else:
-        logging.info(f"Synthesis mode '{synthesis_mode}' selected. Skipping RAG dataset and retriever setup.")
+
+    elif synthesis_mode == "target_text":
+        logging.info(f"Synthesis mode '{synthesis_mode}' selected. Loading reference texts from {FETCHED_DATA_CSV_PATH}.")
+        # Attempt to load FETCHED_DATA_CSV_PATH as a pandas DataFrame
+        try:
+            # Assuming load_local_csv_dataset can return a DataFrame or is adapted.
+            # For now, let's use pd.read_csv directly for clarity if load_local_csv_dataset is for HF datasets.
+            if os.path.exists(FETCHED_DATA_CSV_PATH):
+                reference_texts_df = pd.read_csv(FETCHED_DATA_CSV_PATH)
+                # Ensure 'PMID' column is integer for matching
+                if 'PMID' in reference_texts_df.columns:
+                    reference_texts_df['PMID'] = pd.to_numeric(reference_texts_df['PMID'], errors='coerce').fillna(0).astype(int)
+                else:
+                    logging.error(f"'PMID' column not found in {FETCHED_DATA_CSV_PATH}. Cannot use for target text mode.")
+                    raise RuntimeError(f"'PMID' column missing in {FETCHED_DATA_CSV_PATH}")
+                if 'text' not in reference_texts_df.columns:
+                    logging.error(f"'text' column not found in {FETCHED_DATA_CSV_PATH}. Cannot use for target text mode.")
+                    raise RuntimeError(f"'text' column missing in {FETCHED_DATA_CSV_PATH}")
+                logging.info(f"Successfully loaded {len(reference_texts_df)} rows from {FETCHED_DATA_CSV_PATH} for target text lookup.")
+            else:
+                logging.error(f"Reference text file not found: {FETCHED_DATA_CSV_PATH}. Cannot use for target text mode.")
+                raise RuntimeError(f"File not found: {FETCHED_DATA_CSV_PATH} for target text mode.")
+        except Exception as e:
+            logging.error(f"Failed to load or process {FETCHED_DATA_CSV_PATH} for target text mode: {e}", exc_info=True)
+            raise RuntimeError(f"Error loading reference texts for target_text mode: {e}")
         # compression_retriever remains None
+
+    else: # llm_knowledge mode
+        logging.info(f"Synthesis mode '{synthesis_mode}' selected. Skipping RAG dataset, retriever, and reference text loading.")
+        # compression_retriever and reference_texts_df remain None
 
     # --- 4. Setup LLM (Always needed) ---
     llm = get_llm(config=LLM_CONFIG)
     if llm is None: raise RuntimeError("Failed to setup LLM.")
 
     # --- 5. Build Graph ---
-    # Pass the potentially None retriever
     app = build_graph(llm=llm, retriever=compression_retriever)
     if app is None: raise RuntimeError("Failed to build LangGraph application.")
 
     logging.info("--- Pipeline Setup Complete ---")
-    return app
+    return app, reference_texts_df # Return both
 
 def main(eval_file: str, output_file: str, max_rows: Optional[int], wait_time: int, synthesis_mode: str):
     """
@@ -211,7 +239,7 @@ def main(eval_file: str, output_file: str, max_rows: Optional[int], wait_time: i
 
     # --- Setup the Pipeline ---
     try:
-        rag_app = setup_pipeline(synthesis_mode=synthesis_mode)
+        app, reference_texts_df = setup_pipeline(synthesis_mode=synthesis_mode) # Unpack both
     except RuntimeError as e:
         logging.error(f"Pipeline setup failed: {e}. Exiting.")
         return
@@ -255,109 +283,127 @@ def main(eval_file: str, output_file: str, max_rows: Optional[int], wait_time: i
         start_row_time = time.time()
         row_dict = row.to_dict()
         query = row_dict.get('Meta Analysis Name')
-        references_str = row_dict.get('References')
-        original_number = row_dict.get('Number', f'Index_{index}') # Use index if Number is missing
-        target_reference_text_content = None
-        if synthesis_mode == "target_text":
-            target_reference_text_content = row_dict.get('Target Reference Text') # New column
-            if not target_reference_text_content or (isinstance(target_reference_text_content, str) and not target_reference_text_content.strip()):
-                logging.warning(f"Row {index+1}: Synthesis mode is 'target_text' but 'Target Reference Text' column is missing, empty or NaN for this row. Proceeding with empty reference.")
-                target_reference_text_content = "" # Ensure it's an empty string if missing
+        references_str = row_dict.get('References') # PMID string from MedMeta eval file
+        original_number = row_dict.get('Number', f'Index_{index}')
 
         logging.info(f"\n--- Processing Row {index+1}/{num_rows_to_process} (Number: {original_number}) ---")
         logging.info(f"Query: {query}")
 
         generated_conclusion = "Skipped"
-        # Initialize variables before the try block to ensure they exist
         ordered_retrieved_pmids: List[int] = []
         retrieved_docs_list = []
-        missing_pmids_list: List[int] = []
-        target_pmids: Set[int] = set()
+        missing_pmids_list: List[int] = [] # For retrieval mode context
+        target_pmids_for_eval_metrics: Set[int] = set() # PMIDs from 'References' col for metric calculation (if retrieval)
         final_state: Optional[Dict[str, Any]] = None
         hit_at_k: int = 0
         ap_at_k: float = 0.0
+        target_reference_text_content: str = "" # Initialize for all modes
+        num_target_pmids_for_text_synthesis = 0
+        num_texts_found_for_synthesis = 0
 
         if not query or pd.isna(query):
-            logging.warning(f"Row {index+1}: 'Meta Analysis Name' is missing or NaN. Skipping RAG query.")
+            logging.warning(f"Row {index+1}: 'Meta Analysis Name' is missing or NaN. Skipping processing.")
             generated_conclusion = 'Skipped - No Query'
         else:
-            target_pmids = parse_pmids_from_string(references_str)
-            logging.info(f"Parsed Target PMIDs: {target_pmids if target_pmids else 'None'}")
+            # Parse PMIDs from 'References' column - used for retrieval metrics and potentially for target_text source PMIDs
+            target_pmids_for_eval_metrics = parse_pmids_from_string(references_str)
+            logging.info(f"Parsed Target PMIDs (from MedMeta 'References' col for eval metrics/text lookup): {target_pmids_for_eval_metrics if target_pmids_for_eval_metrics else 'None'}")
 
             inputs: Dict[str, Any] = {
                 "research_topic": query,
                 "synthesis_input_source": synthesis_mode,
-                 # Set use_internal_knowledge for compatibility, though routing primarily uses synthesis_input_source
                 "use_internal_knowledge": True if synthesis_mode == "llm_knowledge" else False
             }
-            if synthesis_mode == "target_text":
-                inputs["target_reference_text"] = target_reference_text_content
 
+            if synthesis_mode == "target_text":
+                if reference_texts_df is not None and not reference_texts_df.empty and target_pmids_for_eval_metrics:
+                    num_target_pmids_for_text_synthesis = len(target_pmids_for_eval_metrics)
+                    # Filter the loaded reference_texts_df for these PMIDs
+                    # Ensure PMIDs in reference_texts_df are integers for matching
+                    found_texts_df = reference_texts_df[reference_texts_df['PMID'].isin(list(target_pmids_for_eval_metrics))]
+                    
+                    if not found_texts_df.empty:
+                        # Concatenate the 'text' column from the found articles
+                        # Ensure correct order if needed, though for synthesis a block of text is fine.
+                        # For now, simple concatenation. Could sort by PMID if desired.
+                        target_reference_text_content = "\n\n---\n\n".join(found_texts_df['text'].astype(str).tolist())
+                        num_texts_found_for_synthesis = len(found_texts_df)
+                        logging.info(f"For target_text mode: Found {num_texts_found_for_synthesis} texts for {num_target_pmids_for_text_synthesis} target PMIDs. Concatenated text length: {len(target_reference_text_content)}.")
+                    else:
+                        logging.warning(f"For target_text mode: No texts found in {FETCHED_DATA_CSV_PATH} for PMIDs: {target_pmids_for_eval_metrics}. Synthesizing with empty context.")
+                        target_reference_text_content = "" # Ensure empty if no texts found
+                elif reference_texts_df is None or reference_texts_df.empty:
+                     logging.warning(f"For target_text mode: reference_texts_df (from {FETCHED_DATA_CSV_PATH}) is not loaded or empty. Synthesizing with empty context.")
+                     target_reference_text_content = ""
+                elif not target_pmids_for_eval_metrics:
+                    logging.warning(f"For target_text mode: No PMIDs specified in 'References' column of MedMeta. Synthesizing with empty context.")
+                    target_reference_text_content = ""
+                inputs["target_reference_text"] = target_reference_text_content
+            
+            # RAG invocation logic remains largely the same
             try:
-                logging.info(f"Invoking RAG application with inputs: {{'research_topic': '{query}', 'synthesis_input_source': '{synthesis_mode}', ...}}")
-                logging.info("Invoking RAG application...")
-                # Use invoke for simplicity in evaluation loop
-                final_state = rag_app.invoke(inputs)
+                logging.info(f"Invoking RAG application with inputs: {{'research_topic': '{query}', 'synthesis_input_source': '{synthesis_mode}', 'target_reference_text_present': bool(target_reference_text_content), ...}}")
+                final_state = app.invoke(inputs)
                 logging.info("RAG application invocation complete.")
 
                 if final_state:
                     generated_conclusion = final_state.get('final_conclusion', "Conclusion not found in RAG output")
                     
-                    if synthesis_mode == "llm_knowledge":
-                        logging.info("LLM knowledge path taken. Retrieval metrics are N/A.")
-                        llm_answers = final_state.get('llm_generated_answers', [])
-                        logging.info(f"LLM Generated Answers: {llm_answers if llm_answers else 'N/A'}")
-                        missing_pmids_list = sorted(list(target_pmids)) if target_pmids else []
-                    elif synthesis_mode == "target_text":
-                        logging.info("Target text path taken. Retrieval metrics are N/A.")
-                        # Potentially log part of the target text or its presence
-                        logging.info(f"Target Reference Text was provided (length: {len(target_reference_text_content if target_reference_text_content else '')}).")
-                        missing_pmids_list = sorted(list(target_pmids)) if target_pmids else [] # PMIDs not relevant here
-                    else: # retrieval mode
+                    if synthesis_mode == "retrieval":
                         retrieved_docs_list = final_state.get('retrieved_docs', [])
                         logging.info(f"Retrieved {len(retrieved_docs_list)} documents.")
                         ordered_retrieved_pmids = get_ordered_retrieved_pmids(retrieved_docs_list)
                         logging.info(f"Retrieved PMIDs (ordered): {ordered_retrieved_pmids if ordered_retrieved_pmids else 'None'}")
 
-                        # Calculate metrics - Assign here
-                        hit_at_k = calculate_hit_at_k(ordered_retrieved_pmids, target_pmids, k_value)
-                        ap_at_k = calculate_average_precision_at_k(ordered_retrieved_pmids, target_pmids, k_value)
+                        hit_at_k = calculate_hit_at_k(ordered_retrieved_pmids, target_pmids_for_eval_metrics, k_value)
+                        ap_at_k = calculate_average_precision_at_k(ordered_retrieved_pmids, target_pmids_for_eval_metrics, k_value)
                         all_hit_at_k.append(hit_at_k)
                         all_ap_at_k.append(ap_at_k)
                         logging.info(f"Metrics for this row: Hit@{k_value}={hit_at_k}, AP@{k_value}={ap_at_k:.3f}")
 
-                        if target_pmids:
-                            missing_pmids_set = target_pmids - set(ordered_retrieved_pmids)
+                        if target_pmids_for_eval_metrics:
+                            missing_pmids_set = target_pmids_for_eval_metrics - set(ordered_retrieved_pmids)
                             missing_pmids_list = sorted(list(missing_pmids_set))
-                        logging.info(f"Missing PMIDs: {missing_pmids_list if missing_pmids_list else 'None'}")
+                        logging.info(f"Missing PMIDs (for retrieval eval): {missing_pmids_list if missing_pmids_list else 'None'}")
+                    elif synthesis_mode == "llm_knowledge":
+                        logging.info("LLM knowledge path taken. Retrieval metrics are N/A.")
+                        llm_answers = final_state.get('llm_generated_answers', [])
+                        logging.info(f"LLM Generated Answers: {llm_answers if llm_answers else 'N/A'}")
+                        missing_pmids_list = sorted(list(target_pmids_for_eval_metrics)) if target_pmids_for_eval_metrics else [] # PMIDs from MedMeta References
+                    elif synthesis_mode == "target_text":
+                        logging.info("Target text path taken. Retrieval metrics are N/A.")
+                        logging.info(f"Target Reference Text (length: {len(target_reference_text_content)}) was used for synthesis.")
+                        missing_pmids_list = [] # Not applicable for this mode in terms of retrieval misses
                 else:
                      generated_conclusion = "Error: RAG invocation returned None"
                      logging.error("RAG invocation returned None state.")
-                     missing_pmids_list = sorted(list(target_pmids)) if target_pmids else []
-
+                     missing_pmids_list = sorted(list(target_pmids_for_eval_metrics)) if target_pmids_for_eval_metrics else []
 
             except Exception as e:
                 logging.error(f"Error during RAG invocation or processing for row index {index} (Number: {original_number}): {e}", exc_info=True)
-                generated_conclusion = f"Error: {type(e).__name__}" # Store error type
-                # If error, assume all target PMIDs are missing
-                missing_pmids_list = sorted(list(target_pmids)) if target_pmids else []
-                # Metrics remain at their initialized values (0, 0.0)
+                generated_conclusion = f"Error: {type(e).__name__}" 
+                missing_pmids_list = sorted(list(target_pmids_for_eval_metrics)) if target_pmids_for_eval_metrics else []
 
-
-        # Store results - Now ordered_retrieved_pmids, hit_at_k, ap_at_k are guaranteed to exist
+        # Store results
         result_row = {
-            **row_dict, # Include original columns
+            **row_dict, 
             'Generated Conclusion': generated_conclusion,
-            'Retrieved PMIDs Ordered': ordered_retrieved_pmids, # Store ordered list
-            'Target PMIDs': sorted(list(target_pmids)),
-            'Missing PMIDs': missing_pmids_list,
-            'Num Retrieved': len(ordered_retrieved_pmids),
-            'Num Target': len(target_pmids),
-            'Num Missing': len(missing_pmids_list),
-            f'Hit@{k_value}': hit_at_k, # Store per-row metric
-            f'AP@{k_value}': ap_at_k,   # Store per-row metric
+            'Retrieved PMIDs Ordered': ordered_retrieved_pmids if synthesis_mode == "retrieval" else 'N/A',
+            'Target PMIDs (for eval metrics)': sorted(list(target_pmids_for_eval_metrics)),
+            'Missing PMIDs (retrieval eval)': missing_pmids_list if synthesis_mode == "retrieval" else 'N/A',
+            'Num Retrieved (retrieval eval)': len(ordered_retrieved_pmids) if synthesis_mode == "retrieval" else 0,
+            'Num Target (for eval metrics)': len(target_pmids_for_eval_metrics),
+            'Num Missing (retrieval eval)': len(missing_pmids_list) if synthesis_mode == "retrieval" else 0,
+            f'Hit@{k_value}': hit_at_k if synthesis_mode == "retrieval" else 0,
+            f'AP@{k_value}': ap_at_k if synthesis_mode == "retrieval" else 0.0,
         }
-        # Optionally add details from final_state if needed
+        
+        if synthesis_mode == "target_text":
+            result_row['Num Target PMIDs For Text Synthesis'] = num_target_pmids_for_text_synthesis
+            result_row['Num Texts Found For Synthesis'] = num_texts_found_for_synthesis
+            result_row['Target Reference Text Length'] = len(target_reference_text_content)
+            result_row['Target Reference PMIDs Used'] = sorted(list(target_pmids_for_eval_metrics)) # PMIDs used to look up text
+
         if final_state:
              result_row['Generated Plan'] = str(final_state.get('research_plan', 'N/A'))
              if synthesis_mode == "llm_knowledge":
@@ -366,9 +412,13 @@ def main(eval_file: str, output_file: str, max_rows: Optional[int], wait_time: i
              elif synthesis_mode == "target_text":
                  result_row['LLM Generated Answers'] = 'N/A (Target Text Path)'
                  result_row['Generated Queries'] = 'N/A (Target Text Path)'
-                 result_row['Target Reference Text Provided'] = bool(target_reference_text_content and target_reference_text_content.strip())
              else: # retrieval
                  result_row['Generated Queries'] = str(final_state.get('search_queries', 'N/A'))
+        else: # Handle case where final_state might be None due to error before RAG call
+            result_row['Generated Plan'] = 'N/A (Error before RAG or no state)'
+            result_row['Generated Queries'] = 'N/A (Error before RAG or no state)'
+            if synthesis_mode == "llm_knowledge":
+                result_row['LLM Generated Answers'] = 'N/A (Error before RAG or no state)'
 
         results_list.append(result_row)
 
@@ -492,4 +542,4 @@ if __name__ == "__main__":
     # Example Usage:
     # python scripts/03_evaluate_on_medmeta.py --synthesis_mode retrieval
     # python scripts/03_evaluate_on_medmeta.py --synthesis_mode llm_knowledge --max_rows 5
-    # python scripts/03_evaluate_on_medmeta.py --synthesis_mode target_text --eval_file path/to/your/eval_with_target_text_column.csv
+    # python scripts/03_evaluate_on_medmeta.py --synthesis_mode target_text --eval_file path/to/medmeta_eval.csv # Assumes FETCHED_DATA_CSV_PATH is correctly set in config
