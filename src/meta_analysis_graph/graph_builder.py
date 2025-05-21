@@ -43,14 +43,33 @@ def route_to_retrieval(state: MetaAnalysisState) -> List[Send]:
 
 def decide_knowledge_path(state: MetaAnalysisState) -> str:
     """
-    Decides whether to use LLM internal knowledge or proceed with document retrieval.
+    Decides the primary path for context generation or direct synthesis.
+    Routes based on the 'synthesis_input_source' field in the state:
+    - "llm_knowledge": Routes to answer questions using LLM's internal knowledge.
+    - "retrieved_docs": Routes to generate search queries for document retrieval.
+    - "target_text": Routes directly to synthesize conclusion using provided text.
     """
     logging.info("--- Router: decide_knowledge_path ---")
-    if state.get("use_internal_knowledge"):
-        logging.info("Path chosen: Use LLM internal knowledge.")
+    synthesis_source = state.get("synthesis_input_source")
+
+    if synthesis_source == "llm_knowledge":
+        logging.info("Path chosen: Use LLM internal knowledge (synthesis_input_source='llm_knowledge').")
         return "answer_questions_with_llm"
+    elif synthesis_source == "target_text":
+        logging.info("Path chosen: Use provided target reference text (synthesis_input_source='target_text'). Routing directly to synthesis.")
+        return "synthesize_conclusion_direct" # New route name for clarity
+    elif synthesis_source == "retrieved_docs":
+        logging.info("Path chosen: Retrieve documents (synthesis_input_source='retrieved_docs').")
+        return "generate_search_queries"
     else:
-        logging.info("Path chosen: Retrieve documents.")
+        # Default behavior if synthesis_input_source is not set or is an unexpected value.
+        # For robustness, let's default to retrieval path.
+        # The 'use_internal_knowledge' flag could be checked here as a fallback,
+        # but it's better if 'synthesis_input_source' is always explicitly set by the caller.
+        # For now, let's assume 'retrieved_docs' is the implicit default if 'synthesis_input_source' is missing.
+        logging.warning(f"synthesis_input_source is '{synthesis_source}'. Defaulting to document retrieval path.")
+        # To ensure state consistency if this path is taken by default:
+        # state['synthesis_input_source'] = "retrieved_docs" # This modification should be done carefully or in entry point
         return "generate_search_queries"
 
 # --- Build the Graph ---
@@ -90,7 +109,8 @@ def build_graph(llm: BaseChatModel, retriever: Optional[ContextualCompressionRet
             decide_knowledge_path,
             {
                 "generate_search_queries": "generate_search_queries",
-                "answer_questions_with_llm": "answer_questions_with_llm"
+                "answer_questions_with_llm": "answer_questions_with_llm",
+                "synthesize_conclusion_direct": "synthesize_conclusion" # Added new route
             }
         )
 

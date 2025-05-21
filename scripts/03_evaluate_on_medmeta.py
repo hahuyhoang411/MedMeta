@@ -142,16 +142,16 @@ def calculate_average_precision_at_k(ordered_retrieved_pmids: List[int], target_
     # Normalize by the total number of relevant documents (min(k, len(target_pmids)) is sometimes used, but standard is len(target_pmids))
     return ap_sum / len(target_pmids) if target_pmids else 0.0
     
-def setup_pipeline(use_llm_knowledge: bool):
+def setup_pipeline(synthesis_mode: str):
     """Consolidated setup function to prepare data, retrievers, LLM, and graph."""
     logging.info("--- Setting up RAG Pipeline for Evaluation ---")
     logging.info(f"Using device: {DEVICE}")
-    if use_llm_knowledge:
-        logging.info("LLM knowledge path selected. Skipping RAG dataset and retriever setup.")
+    logging.info(f"Selected synthesis mode: {synthesis_mode}")
 
     # --- 1. Load and Prepare Data (Conditional) ---
     compression_retriever: Optional[ContextualCompressionRetriever] = None
-    if not use_llm_knowledge:
+    if synthesis_mode == "retrieval":
+        logging.info("Retrieval mode selected. Setting up RAG dataset and retriever.")
         ref_dataset = load_local_csv_dataset(FETCHED_DATA_CSV_PATH)
         if ref_dataset is None: raise RuntimeError("Failed to load reference dataset.")
 
@@ -175,7 +175,9 @@ def setup_pipeline(use_llm_knowledge: bool):
         # --- 3. Setup Retrievers (Conditional) ---
         compression_retriever = setup_retrieval_chain(docs, config=RETRIEVER_CONFIG, device=DEVICE)
         if compression_retriever is None: raise RuntimeError("Failed to setup retrieval chain for document retrieval path.")
-    # else: compression_retriever remains None
+    else:
+        logging.info(f"Synthesis mode '{synthesis_mode}' selected. Skipping RAG dataset and retriever setup.")
+        # compression_retriever remains None
 
     # --- 4. Setup LLM (Always needed) ---
     llm = get_llm(config=LLM_CONFIG)
@@ -189,7 +191,7 @@ def setup_pipeline(use_llm_knowledge: bool):
     logging.info("--- Pipeline Setup Complete ---")
     return app
 
-def main(eval_file: str, output_file: str, max_rows: Optional[int], wait_time: int, use_llm_knowledge: bool):
+def main(eval_file: str, output_file: str, max_rows: Optional[int], wait_time: int, synthesis_mode: str):
     """
     Main function to run evaluation on the MedMeta dataset.
 
@@ -198,17 +200,18 @@ def main(eval_file: str, output_file: str, max_rows: Optional[int], wait_time: i
         output_file: Path to save the evaluation results CSV.
         max_rows: Maximum number of rows to process from eval_file (None for all).
         wait_time: Seconds to wait between processing rows (for API rate limits).
-        use_llm_knowledge: Whether to use the LLM's internal knowledge path.
+        synthesis_mode: The synthesis mode to use ('retrieval', 'llm_knowledge', 'target_text').
     """
     eval_start_time = time.time()
     k_value = RETRIEVER_CONFIG.get('COMPRESSION_TOP_N', 5) # Define K for metrics
     logging.info(f"Calculating metrics using k={k_value}")
-    if use_llm_knowledge:
-        logging.info("Evaluation mode: Using LLM internal knowledge. Retrieval metrics will be skipped/defaulted.")
+    logging.info(f"Evaluation mode: Synthesis Source = '{synthesis_mode}'")
+    if synthesis_mode != "retrieval":
+        logging.info("Retrieval metrics will be skipped/defaulted.")
 
     # --- Setup the Pipeline ---
     try:
-        rag_app = setup_pipeline(use_llm_knowledge=use_llm_knowledge)
+        rag_app = setup_pipeline(synthesis_mode=synthesis_mode)
     except RuntimeError as e:
         logging.error(f"Pipeline setup failed: {e}. Exiting.")
         return
@@ -254,6 +257,12 @@ def main(eval_file: str, output_file: str, max_rows: Optional[int], wait_time: i
         query = row_dict.get('Meta Analysis Name')
         references_str = row_dict.get('References')
         original_number = row_dict.get('Number', f'Index_{index}') # Use index if Number is missing
+        target_reference_text_content = None
+        if synthesis_mode == "target_text":
+            target_reference_text_content = row_dict.get('Target Reference Text') # New column
+            if not target_reference_text_content or (isinstance(target_reference_text_content, str) and not target_reference_text_content.strip()):
+                logging.warning(f"Row {index+1}: Synthesis mode is 'target_text' but 'Target Reference Text' column is missing, empty or NaN for this row. Proceeding with empty reference.")
+                target_reference_text_content = "" # Ensure it's an empty string if missing
 
         logging.info(f"\n--- Processing Row {index+1}/{num_rows_to_process} (Number: {original_number}) ---")
         logging.info(f"Query: {query}")
@@ -275,8 +284,17 @@ def main(eval_file: str, output_file: str, max_rows: Optional[int], wait_time: i
             target_pmids = parse_pmids_from_string(references_str)
             logging.info(f"Parsed Target PMIDs: {target_pmids if target_pmids else 'None'}")
 
-            inputs = {"research_topic": query, "use_internal_knowledge": use_llm_knowledge}
+            inputs: Dict[str, Any] = {
+                "research_topic": query,
+                "synthesis_input_source": synthesis_mode,
+                 # Set use_internal_knowledge for compatibility, though routing primarily uses synthesis_input_source
+                "use_internal_knowledge": True if synthesis_mode == "llm_knowledge" else False
+            }
+            if synthesis_mode == "target_text":
+                inputs["target_reference_text"] = target_reference_text_content
+
             try:
+                logging.info(f"Invoking RAG application with inputs: {{'research_topic': '{query}', 'synthesis_input_source': '{synthesis_mode}', ...}}")
                 logging.info("Invoking RAG application...")
                 # Use invoke for simplicity in evaluation loop
                 final_state = rag_app.invoke(inputs)
@@ -285,19 +303,19 @@ def main(eval_file: str, output_file: str, max_rows: Optional[int], wait_time: i
                 if final_state:
                     generated_conclusion = final_state.get('final_conclusion', "Conclusion not found in RAG output")
                     
-                    if use_llm_knowledge:
-                        logging.info("LLM knowledge path taken. Skipping retrieval-based metrics calculation.")
+                    if synthesis_mode == "llm_knowledge":
+                        logging.info("LLM knowledge path taken. Retrieval metrics are N/A.")
                         llm_answers = final_state.get('llm_generated_answers', [])
                         logging.info(f"LLM Generated Answers: {llm_answers if llm_answers else 'N/A'}")
-                        # Metrics will remain at their default (0 or empty list)
-                        # Missing PMIDs will be all target PMIDs if any
                         missing_pmids_list = sorted(list(target_pmids)) if target_pmids else []
-                    else:
-                        # Extract retrieved docs - handle potential variation in state structure
-                        retrieved_docs_list = final_state.get('retrieved_docs', []) # Assign here
+                    elif synthesis_mode == "target_text":
+                        logging.info("Target text path taken. Retrieval metrics are N/A.")
+                        # Potentially log part of the target text or its presence
+                        logging.info(f"Target Reference Text was provided (length: {len(target_reference_text_content if target_reference_text_content else '')}).")
+                        missing_pmids_list = sorted(list(target_pmids)) if target_pmids else [] # PMIDs not relevant here
+                    else: # retrieval mode
+                        retrieved_docs_list = final_state.get('retrieved_docs', [])
                         logging.info(f"Retrieved {len(retrieved_docs_list)} documents.")
-
-                        # Get ORDERED retrieved PMIDs - Assign here
                         ordered_retrieved_pmids = get_ordered_retrieved_pmids(retrieved_docs_list)
                         logging.info(f"Retrieved PMIDs (ordered): {ordered_retrieved_pmids if ordered_retrieved_pmids else 'None'}")
 
@@ -342,10 +360,14 @@ def main(eval_file: str, output_file: str, max_rows: Optional[int], wait_time: i
         # Optionally add details from final_state if needed
         if final_state:
              result_row['Generated Plan'] = str(final_state.get('research_plan', 'N/A'))
-             if use_llm_knowledge:
+             if synthesis_mode == "llm_knowledge":
                  result_row['LLM Generated Answers'] = str(final_state.get('llm_generated_answers', 'N/A'))
-                 result_row['Generated Queries'] = 'N/A (LLM Knowledge Path)' # Queries not generated in this path
-             else:
+                 result_row['Generated Queries'] = 'N/A (LLM Knowledge Path)'
+             elif synthesis_mode == "target_text":
+                 result_row['LLM Generated Answers'] = 'N/A (Target Text Path)'
+                 result_row['Generated Queries'] = 'N/A (Target Text Path)'
+                 result_row['Target Reference Text Provided'] = bool(target_reference_text_content and target_reference_text_content.strip())
+             else: # retrieval
                  result_row['Generated Queries'] = str(final_state.get('search_queries', 'N/A'))
 
         results_list.append(result_row)
@@ -373,38 +395,36 @@ def main(eval_file: str, output_file: str, max_rows: Optional[int], wait_time: i
                 print(df_results.head())
             print("\n--- Evaluation Summary (k={k_value}) ---")
             # Calculate overall metrics
-            if all_ap_at_k: # Only meaningful if not use_llm_knowledge for all rows
-                map_at_k = np.mean(all_ap_at_k)
-                print(f"MAP@{k_value}: {map_at_k:.4f}")
-            else:
-                print(f"MAP@{k_value}: N/A (No results or LLM knowledge path used exclusively)")
+            if synthesis_mode == "retrieval": # Only calculate these for retrieval mode
+                if all_ap_at_k:
+                    map_at_k = np.mean(all_ap_at_k)
+                    print(f"MAP@{k_value}: {map_at_k:.4f}")
+                else:
+                     print(f"Hit Rate@{k_value}: N/A (No results or not in retrieval mode)")
 
-            if all_hit_at_k: # Only meaningful if not use_llm_knowledge for all rows
-                hit_rate_at_k = np.mean(all_hit_at_k)
-                print(f"Hit Rate@{k_value}: {hit_rate_at_k:.4f}")
-            else:
-                 print(f"Hit Rate@{k_value}: N/A (No results or LLM knowledge path used exclusively)")
+                if 'Num Target' in df_results.columns and 'Num Missing' in df_results.columns:
+                    df_results['Recall@NumRetrieved'] = df_results.apply(
+                        lambda r: (r['Num Target'] - r['Num Missing']) / r['Num Target'] if r['Num Target'] > 0 else (1.0 if r['Num Missing'] == 0 and r['Num Target'] == 0 else 0.0),
+                        axis=1
+                    )
+                    avg_recall = df_results['Recall@NumRetrieved'].mean()
+                    print(f"Average Recall@(Num Retrieved): {avg_recall:.4f}") # Recall over all retrieved docs
 
-            # Keep existing recall calculation if desired, also conditional
-            if not use_llm_knowledge and 'Num Target' in df_results.columns and 'Num Missing' in df_results.columns:
-                # Ensure division by zero is handled if Num Target is 0
-                df_results['Recall@NumRetrieved'] = df_results.apply(
-                    lambda r: (r['Num Target'] - r['Num Missing']) / r['Num Target'] if r['Num Target'] > 0 else (1.0 if r['Num Missing'] == 0 and r['Num Target'] == 0 else 0.0),
-                    axis=1
-                )
-                avg_recall = df_results['Recall@NumRetrieved'].mean()
-                print(f"Average Recall@(Num Retrieved): {avg_recall:.4f}") # Recall over all retrieved docs
+                    # Calculate Precision@(Num Retrieved)
+                    df_results['Precision@NumRetrieved'] = df_results.apply(
+                        lambda r: (r['Num Target'] - r['Num Missing']) / r['Num Retrieved'] if r['Num Retrieved'] > 0 else 0.0,
+                        axis=1
+                    )
+                    avg_precision = df_results['Precision@NumRetrieved'].mean()
+                    print(f"Average Precision@(Num Retrieved): {avg_precision:.4f}")
 
-                # Calculate Precision@(Num Retrieved)
-                df_results['Precision@NumRetrieved'] = df_results.apply(
-                    lambda r: (r['Num Target'] - r['Num Missing']) / r['Num Retrieved'] if r['Num Retrieved'] > 0 else 0.0,
-                    axis=1
-                )
-                avg_precision = df_results['Precision@NumRetrieved'].mean()
-                print(f"Average Precision@(Num Retrieved): {avg_precision:.4f}")
-
-                print(f"Total Missing PMIDs across all rows: {df_results['Num Missing'].sum()}")
-
+                    print(f"Total Missing PMIDs across all rows: {df_results['Num Missing'].sum()}")
+            else: # llm_knowledge or target_text mode
+                print(f"MAP@{k_value}: N/A (Not in retrieval mode)")
+                print(f"Hit Rate@{k_value}: N/A (Not in retrieval mode)")
+                print(f"Average Recall@(Num Retrieved): N/A (Not in retrieval mode)")
+                print(f"Average Precision@(Num Retrieved): N/A (Not in retrieval mode)")
+                print(f"Total Missing PMIDs across all rows: N/A (Not in retrieval mode or no PMIDs tracked)")
 
         except Exception as e:
             logging.error(f"Failed to save evaluation results: {e}", exc_info=True)
@@ -446,9 +466,11 @@ if __name__ == "__main__":
         help="Seconds to wait between processing rows (for API rate limits)."
     )
     parser.add_argument(
-        "--use_llm_knowledge",
-        action='store_true', # Makes it a boolean flag
-        help="Use LLM's internal knowledge instead of document retrieval. Retrieval metrics will be skipped."
+        "--synthesis_mode",
+        type=str,
+        default="retrieval", # Default to standard retrieval
+        choices=["retrieval", "llm_knowledge", "target_text"],
+        help="The synthesis mode to use: 'retrieval' (RAG), 'llm_knowledge' (LLM internal), or 'target_text' (direct input)."
     )
 
     args = parser.parse_args()
@@ -457,16 +479,17 @@ if __name__ == "__main__":
     # This part of your original script seems to be missing the actual update of k_value from args.k_metrics
     # For now, k_value is taken from RETRIEVER_CONFIG. COMPRESSION_TOP_N
     # If you intended args.k_metrics to override it, that logic should be added.
+    # RETRIEVER_CONFIG['COMPRESSION_TOP_N'] = args.k_metrics # Example of overriding
 
     main(
         eval_file=args.eval_file,
         output_file=args.output,
         max_rows=args.max_rows,
         wait_time=args.wait,
-        use_llm_knowledge=args.use_llm_knowledge # Pass the new argument
+        synthesis_mode=args.synthesis_mode # Pass the new argument
     )
 
     # Example Usage:
-    # python scripts/03_evaluate_on_medmeta.py
-    # python scripts/03_evaluate_on_medmeta.py --max_rows 5 --wait 5
-    # python scripts/03_evaluate_on_medmeta.py --max_rows 5 --wait 5 --use_llm_knowledge
+    # python scripts/03_evaluate_on_medmeta.py --synthesis_mode retrieval
+    # python scripts/03_evaluate_on_medmeta.py --synthesis_mode llm_knowledge --max_rows 5
+    # python scripts/03_evaluate_on_medmeta.py --synthesis_mode target_text --eval_file path/to/your/eval_with_target_text_column.csv

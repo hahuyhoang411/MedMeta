@@ -135,13 +135,15 @@ def answer_questions_with_llm(state: MetaAnalysisState, llm: BaseChatModel) -> D
 def synthesize_conclusion(state: MetaAnalysisState, llm: BaseChatModel) -> Dict[str, Any]:
     """
     Synthesizes a final conclusion.
-    If 'use_internal_knowledge' is True in state, it uses LLM-generated answers.
-    Otherwise, it uses aggregated retrieved documents.
+    The source of information for synthesis is determined by 'synthesis_input_source' in the state:
+    - "retrieved_docs": Uses aggregated retrieved documents.
+    - "llm_knowledge": Uses LLM-generated answers.
+    - "target_text": Uses a directly provided target reference text.
     """
     logging.info("--- Node: synthesize_conclusion ---")
     topic = state['research_topic']
     plan = state.get('research_plan')
-    use_internal_knowledge = state.get('use_internal_knowledge', False)
+    synthesis_source = state.get('synthesis_input_source', "retrieved_docs") # Default to retrieved_docs if not specified
 
     key_questions_str = "N/A"
     if plan and isinstance(plan, ResearchPlan) and plan.key_questions:
@@ -152,11 +154,11 @@ def synthesize_conclusion(state: MetaAnalysisState, llm: BaseChatModel) -> Dict[
     context_string = ""
     synthesis_input_type = ""
 
-    if use_internal_knowledge:
+    if synthesis_source == "llm_knowledge":
         logging.info("Synthesizing conclusion from LLM-generated answers.")
         llm_answers = state.get('llm_generated_answers', [])
         if not llm_answers:
-            logging.warning("No LLM-generated answers found to synthesize a conclusion.")
+            logging.warning("No LLM-generated answers found to synthesize a conclusion (source: llm_knowledge).")
             return {"final_conclusion": "No LLM-generated answers were available to synthesize a conclusion."}
 
         context_string = "\n\n---\n\n".join(
@@ -164,7 +166,15 @@ def synthesize_conclusion(state: MetaAnalysisState, llm: BaseChatModel) -> Dict[
              for ans in llm_answers]
         )
         synthesis_input_type = "LLM-Generated Answers to Research Questions"
-    else:
+    elif synthesis_source == "target_text":
+        logging.info("Synthesizing conclusion from provided target reference text.")
+        target_text = state.get('target_reference_text')
+        if not target_text:
+            logging.warning("No target reference text found to synthesize a conclusion (source: target_text).")
+            return {"final_conclusion": "No target reference text was provided to synthesize a conclusion."}
+        context_string = target_text
+        synthesis_input_type = "Provided Target Reference Text"
+    elif synthesis_source == "retrieved_docs": # Default or explicitly set
         logging.info("Synthesizing conclusion from retrieved documents.")
         retrieved_docs = state.get('retrieved_docs', [])
         seen_content = set()
@@ -173,18 +183,20 @@ def synthesize_conclusion(state: MetaAnalysisState, llm: BaseChatModel) -> Dict[
             if doc.page_content not in seen_content:
                 unique_docs.append(doc)
                 seen_content.add(doc.page_content)
-        logging.info(f"Aggregated {len(retrieved_docs)} docs, reduced to {len(unique_docs)} unique docs for synthesis.")
+        logging.info(f"Aggregated {len(retrieved_docs)} docs, reduced to {len(unique_docs)} unique docs for synthesis (source: retrieved_docs).")
 
         if not unique_docs:
-            logging.warning("No unique documents found to synthesize a conclusion.")
+            logging.warning("No unique documents found to synthesize a conclusion (source: retrieved_docs).")
             return {"final_conclusion": "No relevant documents were found or retrieved to synthesize a conclusion."}
 
-        # Limit context size if necessary
         context_string = "\n\n---\n\n".join(
             [f"Source PMID: {doc.metadata.get('PMID', 'N/A')}\nYear: {doc.metadata.get('Year', 'N/A')}\nContent:\n{doc.page_content}"
-             for doc in unique_docs[:50]] # Limit context to first 50 unique docs for safety
+             for doc in unique_docs[:50]] # Limit context to first 50 unique docs
         )
         synthesis_input_type = "Retrieved Study Context"
+    else:
+        logging.error(f"Invalid synthesis_input_source: {synthesis_source}. Defaulting to no conclusion.")
+        return {"final_conclusion": "Invalid input source specified for synthesis."}
 
     prompt_template_str = (
         "You are a research analyst tasked with creating the final concluding summary for a meta-analysis or systematic review. "
@@ -201,7 +213,6 @@ def synthesize_conclusion(state: MetaAnalysisState, llm: BaseChatModel) -> Dict[
         ("system", prompt_template_str.split("\n\nResearch Topic:")[0].strip()), # System part
         ("human", "\nResearch Topic: {topic}" + prompt_template_str.split("\nResearch Topic: {topic}", 1)[1]) # Human part
     ])
-
 
     try:
         synthesis_chain = prompt | llm
