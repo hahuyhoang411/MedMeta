@@ -86,22 +86,22 @@ JUDGE_CONFIGS = [
     #     "api_base": None, # Not needed for Gemini API
     #     "reasoning_effort": "high"
     # },
-    # {
-    #     "name": "OpenAI-o4-mini-high",
-    #     "model": "o4-mini", # Use latest flash
-    #     "api_key_env_var": "OPENAI_API_KEY",
-    #     "max_tokens": 8192, # Adjust if needed
-    #     "temperature": 1.0, # OpenAi requires temperature to be set at 1.0 for O series
-    #     "api_base": None, # Not needed for OpenRouter API
-    # },
     {
-        "name": "OpenAI-o3",
-        "model": "o3", # Use latest flash
+        "name": "OpenAI-o4-mini-high",
+        "model": "o4-mini", # Use latest flash
         "api_key_env_var": "OPENAI_API_KEY",
         "max_tokens": 8192, # Adjust if needed
         "temperature": 1.0, # OpenAi requires temperature to be set at 1.0 for O series
         "api_base": None, # Not needed for OpenRouter API
     },
+    # {
+    #     "name": "OpenAI-o3",
+    #     "model": "o3", # Use latest flash
+    #     "api_key_env_var": "OPENAI_API_KEY",
+    #     "max_tokens": 8192, # Adjust if needed
+    #     "temperature": 1.0, # OpenAi requires temperature to be set at 1.0 for O series
+    #     "api_base": None, # Not needed for OpenRouter API
+    # },
     {
         "name": "Qwen3-235B-A22B",
         "model": "deepinfra/Qwen/Qwen3-235B-A22B", # Use latest flash
