@@ -456,18 +456,24 @@ def main(eval_file: str, output_file: str, max_rows: Optional[int], wait_time: i
             print("\n--- Evaluation Results Sample (First 5 Rows) ---")
             with pd.option_context('display.max_rows', 10, 'display.max_columns', None, 'display.width', 1000, 'display.max_colwidth', 50):
                 print(df_results.head())
-            print("\n--- Evaluation Summary (k={k_value}) ---")
+            print(f"\n--- Evaluation Summary (k={k_value}) ---")
             # Calculate overall metrics
             if synthesis_mode == "retrieval": # Only calculate these for retrieval mode
+                if all_hit_at_k:
+                    hit_rate_at_k = np.mean(all_hit_at_k)
+                    print(f"Hit Rate@{k_value}: {hit_rate_at_k:.4f}")
+                else:
+                    print(f"Hit Rate@{k_value}: N/A (No results)")
+
                 if all_ap_at_k:
                     map_at_k = np.mean(all_ap_at_k)
                     print(f"MAP@{k_value}: {map_at_k:.4f}")
                 else:
-                     print(f"Hit Rate@{k_value}: N/A (No results or not in retrieval mode)")
+                     print(f"MAP@{k_value}: N/A (No results)")
 
-                if 'Num Target' in df_results.columns and 'Num Missing' in df_results.columns:
+                if 'Num Target (for eval metrics)' in df_results.columns and 'Num Missing (retrieval eval)' in df_results.columns:
                     df_results['Recall@NumRetrieved'] = df_results.apply(
-                        lambda r: (r['Num Target'] - r['Num Missing']) / r['Num Target'] if r['Num Target'] > 0 else (1.0 if r['Num Missing'] == 0 and r['Num Target'] == 0 else 0.0),
+                        lambda r: (r['Num Target (for eval metrics)'] - r['Num Missing (retrieval eval)']) / r['Num Target (for eval metrics)'] if r['Num Target (for eval metrics)'] > 0 else (1.0 if r['Num Missing (retrieval eval)'] == 0 and r['Num Target (for eval metrics)'] == 0 else 0.0),
                         axis=1
                     )
                     avg_recall = df_results['Recall@NumRetrieved'].mean()
@@ -475,16 +481,16 @@ def main(eval_file: str, output_file: str, max_rows: Optional[int], wait_time: i
 
                     # Calculate Precision@(Num Retrieved)
                     df_results['Precision@NumRetrieved'] = df_results.apply(
-                        lambda r: (r['Num Target'] - r['Num Missing']) / r['Num Retrieved'] if r['Num Retrieved'] > 0 else 0.0,
+                        lambda r: (r['Num Target (for eval metrics)'] - r['Num Missing (retrieval eval)']) / r['Num Retrieved (retrieval eval)'] if r['Num Retrieved (retrieval eval)'] > 0 else 0.0,
                         axis=1
                     )
                     avg_precision = df_results['Precision@NumRetrieved'].mean()
                     print(f"Average Precision@(Num Retrieved): {avg_precision:.4f}")
 
-                    print(f"Total Missing PMIDs across all rows: {df_results['Num Missing'].sum()}")
+                    print(f"Total Missing PMIDs across all rows: {df_results['Num Missing (retrieval eval)'].sum()}")
             else: # llm_knowledge or target_text mode
-                print(f"MAP@{k_value}: N/A (Not in retrieval mode)")
                 print(f"Hit Rate@{k_value}: N/A (Not in retrieval mode)")
+                print(f"MAP@{k_value}: N/A (Not in retrieval mode)")
                 print(f"Average Recall@(Num Retrieved): N/A (Not in retrieval mode)")
                 print(f"Average Precision@(Num Retrieved): N/A (Not in retrieval mode)")
                 print(f"Total Missing PMIDs across all rows: N/A (Not in retrieval mode or no PMIDs tracked)")
