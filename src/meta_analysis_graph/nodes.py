@@ -132,6 +132,98 @@ def answer_questions_with_llm(state: MetaAnalysisState, llm: BaseChatModel) -> D
     return {"llm_generated_answers": answered_questions}
 
 
+def assess_target_text_suitability(state: MetaAnalysisState, llm: BaseChatModel) -> Dict[str, Any]:
+    """
+    Assesses whether the provided target reference text abstracts contain sufficient
+    information to recreate the original conclusion for the given research topic.
+    Returns a suitability score from 0-5 and detailed assessment.
+    """
+    logging.info("--- Node: assess_target_text_suitability ---")
+    topic = state['research_topic']
+    plan = state.get('research_plan')
+    target_text = state.get('target_reference_text')
+
+    if not target_text:
+        logging.warning("No target reference text found for suitability assessment.")
+        return {
+            "suitability_score": 0,
+            "suitability_assessment": "No target reference text was provided for assessment."
+        }
+
+    key_questions_str = "N/A"
+    if plan and isinstance(plan, ResearchPlan) and plan.key_questions:
+        key_questions_str = "\n".join(f"- {q}" for q in plan.key_questions)
+
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", 
+         "You are an expert research analyst tasked with evaluating the suitability of provided abstracts "
+         "for recreating an original research conclusion. Assess whether the given abstracts contain "
+         "sufficient information, evidence, and coverage to support recreating a comprehensive conclusion "
+         "on the specified research topic.\n\n"
+         "Provide your assessment as:\n"
+         "1. A detailed evaluation of your assessment, including:\n"
+         "   - What key information is present\n"
+         "   - What important information might be missing\n"
+         "   - Overall coverage of the research topic\n"
+         "   - Quality and relevance of the evidence provided\n\n"
+         "2. A score from 0-5 where:\n"
+         "   - 0 = Completely insufficient (0% confidence in recreating conclusion)\n"
+         "   - 1 = Very insufficient (20% confidence)\n"
+         "   - 2 = Insufficient (40% confidence)\n"
+         "   - 3 = Moderately sufficient (60% confidence)\n"
+         "   - 4 = Good sufficiency (80% confidence)\n"
+         "   - 5 = Excellent sufficiency (100% confidence - all needed information present)\n\n"
+         "Base your assessment solely on the provided abstracts."
+        ),
+        ("human", 
+         "Research Topic: {topic}\n\n"
+         "Key Research Questions (if available):\n{key_questions}\n\n"
+         "Target Reference Text Abstracts:\n{target_text}\n\n"
+         "Please assess the suitability of these abstracts for recreating a comprehensive conclusion "
+         "on the research topic. Provide both a detailed evaluation and numerical score (0-5)."
+        )
+    ])
+
+    try:
+        assessment_chain = prompt | llm
+        response = assessment_chain.invoke({
+            "topic": topic,
+            "key_questions": key_questions_str,
+            "target_text": target_text
+        })
+        
+        assessment_text = response.content
+        
+        # Extract score from the response (simple regex approach)
+        import re
+        score_match = re.search(r'(?:score|rating).*?([0-5])', assessment_text.lower())
+        extracted_score = int(score_match.group(1)) if score_match else None
+        
+        # If we can't extract the score automatically, try to parse from start of response
+        if extracted_score is None:
+            first_line = assessment_text.split('\n')[0]
+            score_match = re.search(r'([0-5])', first_line)
+            extracted_score = int(score_match.group(1)) if score_match else 0
+        
+        # Ensure score is within valid range
+        extracted_score = max(0, min(5, extracted_score)) if extracted_score is not None else 0
+        
+        logging.info(f"Suitability assessment completed. Score: {extracted_score}/5")
+        logging.info(f"Assessment preview: {assessment_text[:200]}...")
+        
+        return {
+            "suitability_score": extracted_score,
+            "suitability_assessment": assessment_text
+        }
+        
+    except Exception as e:
+        logging.error(f"Error during suitability assessment: {e}", exc_info=True)
+        return {
+            "suitability_score": 0,
+            "suitability_assessment": f"Error occurred during assessment: {e}"
+        }
+
+
 def synthesize_conclusion(state: MetaAnalysisState, llm: BaseChatModel) -> Dict[str, Any]:
     """
     Synthesizes a final conclusion.

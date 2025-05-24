@@ -216,6 +216,30 @@ def setup_pipeline(synthesis_mode: str, force_reembed: bool = False):
             raise RuntimeError(f"Error loading reference texts for target_text mode: {e}")
         # compression_retriever remains None
 
+    elif synthesis_mode == "target_text_suitability":
+        logging.info(f"Synthesis mode '{synthesis_mode}' selected. Loading reference texts from {FETCHED_DATA_CSV_PATH}.")
+        # Same loading logic as target_text mode since both need access to reference texts
+        try:
+            if os.path.exists(FETCHED_DATA_CSV_PATH):
+                reference_texts_df = pd.read_csv(FETCHED_DATA_CSV_PATH)
+                # Ensure 'PMID' column is integer for matching
+                if 'PMID' in reference_texts_df.columns:
+                    reference_texts_df['PMID'] = pd.to_numeric(reference_texts_df['PMID'], errors='coerce').fillna(0).astype(int)
+                else:
+                    logging.error(f"'PMID' column not found in {FETCHED_DATA_CSV_PATH}. Cannot use for target text suitability mode.")
+                    raise RuntimeError(f"'PMID' column missing in {FETCHED_DATA_CSV_PATH}")
+                if 'text' not in reference_texts_df.columns:
+                    logging.error(f"'text' column not found in {FETCHED_DATA_CSV_PATH}. Cannot use for target text suitability mode.")
+                    raise RuntimeError(f"'text' column missing in {FETCHED_DATA_CSV_PATH}")
+                logging.info(f"Successfully loaded {len(reference_texts_df)} rows from {FETCHED_DATA_CSV_PATH} for target text suitability assessment.")
+            else:
+                logging.error(f"Reference text file not found: {FETCHED_DATA_CSV_PATH}. Cannot use for target text suitability mode.")
+                raise RuntimeError(f"File not found: {FETCHED_DATA_CSV_PATH} for target text suitability mode.")
+        except Exception as e:
+            logging.error(f"Failed to load or process {FETCHED_DATA_CSV_PATH} for target text suitability mode: {e}", exc_info=True)
+            raise RuntimeError(f"Error loading reference texts for target_text_suitability mode: {e}")
+        # compression_retriever remains None
+
     else: # llm_knowledge mode
         logging.info(f"Synthesis mode '{synthesis_mode}' selected. Skipping RAG dataset, retriever, and reference text loading.")
         # compression_retriever and reference_texts_df remain None
@@ -240,7 +264,7 @@ def main(eval_file: str, output_file: str, max_rows: Optional[int], wait_time: i
         output_file: Path to save the evaluation results CSV.
         max_rows: Maximum number of rows to process from eval_file (None for all).
         wait_time: Seconds to wait between processing rows (for API rate limits).
-        synthesis_mode: The synthesis mode to use ('retrieval', 'llm_knowledge', 'target_text').
+        synthesis_mode: The synthesis mode to use ('retrieval', 'llm_knowledge', 'target_text', 'target_text_suitability').
         force_reembed: Whether to force re-embedding even if saved FAISS index exists.
     """
     eval_start_time = time.time()
@@ -326,7 +350,8 @@ def main(eval_file: str, output_file: str, max_rows: Optional[int], wait_time: i
             synthesis_mode_mapping = {
                 "retrieval": "retrieved_docs",
                 "llm_knowledge": "llm_knowledge", 
-                "target_text": "target_text"
+                "target_text": "target_text",
+                "target_text_suitability": "target_text_suitability"
             }
             synthesis_input_source = synthesis_mode_mapping.get(synthesis_mode, "retrieved_docs")
 
@@ -336,7 +361,7 @@ def main(eval_file: str, output_file: str, max_rows: Optional[int], wait_time: i
                 "use_internal_knowledge": True if synthesis_mode == "llm_knowledge" else False
             }
 
-            if synthesis_mode == "target_text":
+            if synthesis_mode in ["target_text", "target_text_suitability"]:
                 if reference_texts_df is not None and not reference_texts_df.empty and target_pmids_for_eval_metrics:
                     num_target_pmids_for_text_synthesis = len(target_pmids_for_eval_metrics)
                     # Filter the loaded reference_texts_df for these PMIDs
@@ -349,15 +374,15 @@ def main(eval_file: str, output_file: str, max_rows: Optional[int], wait_time: i
                         # For now, simple concatenation. Could sort by PMID if desired.
                         target_reference_text_content = "\n\n---\n\n".join(found_texts_df['text'].astype(str).tolist())
                         num_texts_found_for_synthesis = len(found_texts_df)
-                        logging.info(f"For target_text mode: Found {num_texts_found_for_synthesis} texts for {num_target_pmids_for_text_synthesis} target PMIDs. Concatenated text length: {len(target_reference_text_content)}.")
+                        logging.info(f"For {synthesis_mode} mode: Found {num_texts_found_for_synthesis} texts for {num_target_pmids_for_text_synthesis} target PMIDs. Concatenated text length: {len(target_reference_text_content)}.")
                     else:
-                        logging.warning(f"For target_text mode: No texts found in {FETCHED_DATA_CSV_PATH} for PMIDs: {target_pmids_for_eval_metrics}. Synthesizing with empty context.")
+                        logging.warning(f"For {synthesis_mode} mode: No texts found in {FETCHED_DATA_CSV_PATH} for PMIDs: {target_pmids_for_eval_metrics}. Processing with empty context.")
                         target_reference_text_content = "" # Ensure empty if no texts found
                 elif reference_texts_df is None or reference_texts_df.empty:
-                     logging.warning(f"For target_text mode: reference_texts_df (from {FETCHED_DATA_CSV_PATH}) is not loaded or empty. Synthesizing with empty context.")
+                     logging.warning(f"For {synthesis_mode} mode: reference_texts_df (from {FETCHED_DATA_CSV_PATH}) is not loaded or empty. Processing with empty context.")
                      target_reference_text_content = ""
                 elif not target_pmids_for_eval_metrics:
-                    logging.warning(f"For target_text mode: No PMIDs specified in 'References' column of MedMeta. Synthesizing with empty context.")
+                    logging.warning(f"For {synthesis_mode} mode: No PMIDs specified in 'References' column of MedMeta. Processing with empty context.")
                     target_reference_text_content = ""
                 inputs["target_reference_text"] = target_reference_text_content
             
@@ -395,6 +420,14 @@ def main(eval_file: str, output_file: str, max_rows: Optional[int], wait_time: i
                         logging.info("Target text path taken. Retrieval metrics are N/A.")
                         logging.info(f"Target Reference Text (length: {len(target_reference_text_content)}) was used for synthesis.")
                         missing_pmids_list = [] # Not applicable for this mode in terms of retrieval misses
+                    elif synthesis_mode == "target_text_suitability":
+                        logging.info("Target text suitability assessment path taken. Retrieval metrics are N/A.")
+                        suitability_score = final_state.get('suitability_score', 0)
+                        suitability_assessment = final_state.get('suitability_assessment', 'N/A')
+                        logging.info(f"Suitability Score: {suitability_score}/5")
+                        logging.info(f"Suitability Assessment: {suitability_assessment[:200]}...") # Log first 200 chars
+                        missing_pmids_list = [] # Not applicable for this mode in terms of retrieval misses
+                        generated_conclusion = f"Suitability Score: {suitability_score}/5" # Override conclusion for this mode
                 else:
                      generated_conclusion = "Error: RAG invocation returned None"
                      logging.error("RAG invocation returned None state.")
@@ -425,6 +458,18 @@ def main(eval_file: str, output_file: str, max_rows: Optional[int], wait_time: i
             result_row['Target Reference Text Length'] = len(target_reference_text_content)
             result_row['Target Reference PMIDs Used'] = sorted(list(target_pmids_for_eval_metrics)) # PMIDs used to look up text
 
+        if synthesis_mode == "target_text_suitability":
+            result_row['Num Target PMIDs For Text Assessment'] = num_target_pmids_for_text_synthesis
+            result_row['Num Texts Found For Assessment'] = num_texts_found_for_synthesis
+            result_row['Target Reference Text Length'] = len(target_reference_text_content)
+            result_row['Target Reference PMIDs Used'] = sorted(list(target_pmids_for_eval_metrics)) # PMIDs used to look up text
+            if final_state:
+                result_row['Suitability Score'] = final_state.get('suitability_score', 0)
+                result_row['Suitability Assessment'] = final_state.get('suitability_assessment', 'N/A')
+            else:
+                result_row['Suitability Score'] = 0
+                result_row['Suitability Assessment'] = 'Error: No assessment completed'
+
         if final_state:
              result_row['Generated Plan'] = str(final_state.get('research_plan', 'N/A'))
              if synthesis_mode == "llm_knowledge":
@@ -433,6 +478,9 @@ def main(eval_file: str, output_file: str, max_rows: Optional[int], wait_time: i
              elif synthesis_mode == "target_text":
                  result_row['LLM Generated Answers'] = 'N/A (Target Text Path)'
                  result_row['Generated Queries'] = 'N/A (Target Text Path)'
+             elif synthesis_mode == "target_text_suitability":
+                 result_row['LLM Generated Answers'] = 'N/A (Target Text Suitability Path)'
+                 result_row['Generated Queries'] = 'N/A (Target Text Suitability Path)'
              else: # retrieval
                  result_row['Generated Queries'] = str(final_state.get('search_queries', 'N/A'))
         else: # Handle case where final_state might be None due to error before RAG call
@@ -502,6 +550,15 @@ def main(eval_file: str, output_file: str, max_rows: Optional[int], wait_time: i
                 print(f"Average Recall@(Num Retrieved): N/A (Not in retrieval mode)")
                 print(f"Average Precision@(Num Retrieved): N/A (Not in retrieval mode)")
                 print(f"Total Missing PMIDs across all rows: N/A (Not in retrieval mode or no PMIDs tracked)")
+                
+                # Add suitability-specific metrics if applicable
+                if synthesis_mode == "target_text_suitability" and 'Suitability Score' in df_results.columns:
+                    avg_suitability_score = df_results['Suitability Score'].mean()
+                    print(f"Average Suitability Score: {avg_suitability_score:.2f}/5")
+                    print(f"Score Distribution:")
+                    score_counts = df_results['Suitability Score'].value_counts().sort_index()
+                    for score, count in score_counts.items():
+                        print(f"  Score {score}: {count} rows ({count/len(df_results)*100:.1f}%)")
 
         except Exception as e:
             logging.error(f"Failed to save evaluation results: {e}", exc_info=True)
@@ -546,8 +603,8 @@ if __name__ == "__main__":
         "--synthesis_mode",
         type=str,
         default="retrieval", # Default to standard retrieval
-        choices=["retrieval", "llm_knowledge", "target_text"],
-        help="The synthesis mode to use: 'retrieval' (RAG), 'llm_knowledge' (LLM internal), or 'target_text' (direct input)."
+        choices=["retrieval", "llm_knowledge", "target_text", "target_text_suitability"],
+        help="The synthesis mode to use: 'retrieval' (RAG), 'llm_knowledge' (LLM internal), 'target_text' (direct input), or 'target_text_suitability' (assess suitability)."
     )
     parser.add_argument(
         "--force_reembed",
@@ -576,5 +633,6 @@ if __name__ == "__main__":
     # python scripts/03_evaluate_on_medmeta.py --synthesis_mode retrieval
     # python scripts/03_evaluate_on_medmeta.py --synthesis_mode llm_knowledge --max_rows 5
     # python scripts/03_evaluate_on_medmeta.py --synthesis_mode target_text --eval_file path/to/medmeta_eval.csv # Assumes FETCHED_DATA_CSV_PATH is correctly set in config
+    # python scripts/03_evaluate_on_medmeta.py --synthesis_mode target_text_suitability --eval_file path/to/medmeta_eval.csv # Assess suitability of target texts
     # python scripts/03_evaluate_on_medmeta.py --synthesis_mode retrieval --force_reembed  # Force re-embedding of FAISS index
     # python scripts/03_evaluate_on_medmeta.py --synthesis_mode retrieval --max_rows 10 --force_reembed  # Re-embed and test on 10 rows

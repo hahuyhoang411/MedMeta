@@ -40,8 +40,13 @@ class MetaAnalysisState(TypedDict):
 
     # --- New fields for direct reference text input ---
     target_reference_text: str | None # Optional direct reference text for synthesis
-    synthesis_input_source: Literal["retrieved_docs", "llm_knowledge", "target_text"] # Specifies the source for synthesis
+    synthesis_input_source: Literal["retrieved_docs", "llm_knowledge", "target_text", "target_text_suitability"] # Specifies the source for synthesis
     # --- End new fields ---
+
+    # --- New field for suitability assessment ---
+    suitability_score: int | None  # Score 0-5 for target text suitability assessment
+    suitability_assessment: str | None # Detailed assessment explanation
+    # --- End new field ---
 
     # Temporary state for parallel execution (managed by LangGraph)
     current_query: str            # The query currently being processed by a branch
