@@ -322,9 +322,17 @@ def main(eval_file: str, output_file: str, max_rows: Optional[int], wait_time: i
             target_pmids_for_eval_metrics = parse_pmids_from_string(references_str)
             logging.info(f"Parsed Target PMIDs (from MedMeta 'References' col for eval metrics/text lookup): {target_pmids_for_eval_metrics if target_pmids_for_eval_metrics else 'None'}")
 
+            # Map synthesis_mode to the expected synthesis_input_source values
+            synthesis_mode_mapping = {
+                "retrieval": "retrieved_docs",
+                "llm_knowledge": "llm_knowledge", 
+                "target_text": "target_text"
+            }
+            synthesis_input_source = synthesis_mode_mapping.get(synthesis_mode, "retrieved_docs")
+
             inputs: Dict[str, Any] = {
                 "research_topic": query,
-                "synthesis_input_source": synthesis_mode,
+                "synthesis_input_source": synthesis_input_source,
                 "use_internal_knowledge": True if synthesis_mode == "llm_knowledge" else False
             }
 
@@ -355,7 +363,7 @@ def main(eval_file: str, output_file: str, max_rows: Optional[int], wait_time: i
             
             # RAG invocation logic remains largely the same
             try:
-                logging.info(f"Invoking RAG application with inputs: {{'research_topic': '{query}', 'synthesis_input_source': '{synthesis_mode}', 'target_reference_text_present': bool(target_reference_text_content), ...}}")
+                logging.info(f"Invoking RAG application with inputs: {{'research_topic': '{query}', 'synthesis_input_source': '{synthesis_input_source}', 'target_reference_text_present': bool(target_reference_text_content), ...}}")
                 final_state = app.invoke(inputs)
                 logging.info("RAG application invocation complete.")
 
