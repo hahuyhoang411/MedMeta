@@ -198,18 +198,68 @@ def assess_target_text_suitability(state: MetaAnalysisState, llm: BaseChatModel)
         
         assessment_text = response.content
         
-        # Extract score from the response (simple regex approach)
+        # Extract score from the response with improved parsing
         import re
-        score_match = re.search(r'(?:score|rating).*?([0-5])', assessment_text.lower())
-        extracted_score = int(score_match.group(1)) if score_match else None
+        extracted_score = None
         
-        # If we can't extract the score automatically, try to parse from start of response
+        # Method 1: Look for "Score:" or "Rating:" followed by a number (handles whitespace and newlines)
+        score_patterns = [
+            r'(?:score|rating)\s*:?\s*\n*\s*([0-5])',  # Score: 3 or Score:\n\n3
+            r'(?:score|rating)\s*:?\s*\n*\s*([0-5])\s*/\s*5',  # Score: 3/5 or Score:\n3/5
+            r'(?:score|rating)\s*:?\s*\n*\s*([0-5])\s*out\s*of\s*5',  # Score: 3 out of 5
+        ]
+        
+        for pattern in score_patterns:
+            match = re.search(pattern, assessment_text.lower())
+            if match:
+                try:
+                    extracted_score = int(match.group(1))
+                    break
+                except (ValueError, IndexError):
+                    continue
+        
+        # Method 2: Look for standalone numbers with score context
         if extracted_score is None:
-            first_line = assessment_text.split('\n')[0]
-            score_match = re.search(r'([0-5])', first_line)
-            extracted_score = int(score_match.group(1)) if score_match else 0
+            # Look for patterns like "## Score:\n\n2" or "The score is 3"
+            context_patterns = [
+                r'(?:score|rating|assign|give|rate)\s*(?:is|of)?\s*:?\s*\n*\s*([0-5])',
+                r'([0-5])\s*/\s*5',  # X/5 pattern
+                r'([0-5])\s*out\s*of\s*5',  # X out of 5 pattern
+            ]
+            
+            for pattern in context_patterns:
+                matches = re.findall(pattern, assessment_text.lower())
+                if matches:
+                    try:
+                        # Take the last occurrence (often the final score)
+                        extracted_score = int(matches[-1])
+                        break
+                    except (ValueError, IndexError):
+                        continue
         
-        # Ensure score is within valid range
+        # Method 3: Look at the last few lines for a standalone number (common LLM pattern)
+        if extracted_score is None:
+            lines = assessment_text.strip().split('\n')
+            for line in reversed(lines[-5:]):  # Check last 5 lines
+                line = line.strip()
+                if line and re.match(r'^[0-5]$', line):
+                    try:
+                        extracted_score = int(line)
+                        break
+                    except ValueError:
+                        continue
+        
+        # Method 4: Fallback - find any single digit 0-5 in the text
+        if extracted_score is None:
+            all_digits = re.findall(r'\b([0-5])\b', assessment_text)
+            if all_digits:
+                try:
+                    # Take the last occurrence as it's often the final score
+                    extracted_score = int(all_digits[-1])
+                except (ValueError, IndexError):
+                    pass
+        
+        # Ensure score is within valid range, default to 0 if still None
         extracted_score = max(0, min(5, extracted_score)) if extracted_score is not None else 0
         
         logging.info(f"Suitability assessment completed. Score: {extracted_score}/5")
