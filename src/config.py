@@ -30,6 +30,11 @@ MEDMETA_CSV_PATH = os.path.join(DATA_DIR, "MedMeta.csv")
 FETCHED_DATA_CSV_PATH = os.path.join(OUTPUT_DIR, "pubmed_data_final.csv") # Output from script 01
 EVALUATION_RESULTS_CSV_PATH = os.path.join(OUTPUT_DIR, "medmeta_evaluation_results.csv") # Output from script 03
 
+# For the check abstract fit for recreate conclusion
+# MEDMETA_CSV_PATH = "meta_analysis_summary_with_topics.csv"
+# FETCHED_DATA_CSV_PATH = "pubmed_data_final.csv" # Output from script 01
+# EVALUATION_RESULTS_CSV_PATH = "abstract_check.csv" # Output from script 03
+
 # --- Model Names ---
 # Embeddings (Sentence Transformers/HuggingFace)
 BGE_MODEL_NAME = "BAAI/bge-m3"

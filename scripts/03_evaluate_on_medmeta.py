@@ -296,6 +296,12 @@ def main(eval_file: str, output_file: str, max_rows: Optional[int], wait_time: i
         if not required_cols.issubset(df_eval_input.columns):
             logging.error(f"Evaluation file missing required columns. Found: {df_eval_input.columns}. Required: {required_cols}. Exiting.")
             return
+        
+        # For target_text_suitability mode, also check for Conclusion column
+        if synthesis_mode == "target_text_suitability" and 'Conclusion' not in df_eval_input.columns:
+            logging.error(f"target_text_suitability mode requires 'Conclusion' column in evaluation file. Found columns: {df_eval_input.columns}. Exiting.")
+            return
+            
         logging.info(f"Loaded {len(df_eval_input)} rows for evaluation.")
     except Exception as e:
         logging.error(f"Failed to load or validate evaluation CSV: {e}", exc_info=True)
@@ -322,9 +328,12 @@ def main(eval_file: str, output_file: str, max_rows: Optional[int], wait_time: i
         query = row_dict.get('Meta Analysis Name')
         references_str = row_dict.get('References') # PMID string from MedMeta eval file
         original_number = row_dict.get('Number', f'Index_{index}')
+        original_conclusion = row_dict.get('Conclusion') # Extract original conclusion for target_text_suitability mode
 
         logging.info(f"\n--- Processing Row {index+1}/{num_rows_to_process} (Number: {original_number}) ---")
         logging.info(f"Query: {query}")
+        if synthesis_mode == "target_text_suitability" and original_conclusion:
+            logging.info(f"Original Conclusion: {original_conclusion[:200]}...") # Log first 200 chars
 
         generated_conclusion = "Skipped"
         ordered_retrieved_pmids: List[int] = []
@@ -360,6 +369,10 @@ def main(eval_file: str, output_file: str, max_rows: Optional[int], wait_time: i
                 "synthesis_input_source": synthesis_input_source,
                 "use_internal_knowledge": True if synthesis_mode == "llm_knowledge" else False
             }
+
+            # Add original conclusion for target_text_suitability mode
+            if synthesis_mode == "target_text_suitability":
+                inputs["original_conclusion"] = original_conclusion
 
             if synthesis_mode in ["target_text", "target_text_suitability"]:
                 if reference_texts_df is not None and not reference_texts_df.empty and target_pmids_for_eval_metrics:
@@ -463,6 +476,7 @@ def main(eval_file: str, output_file: str, max_rows: Optional[int], wait_time: i
             result_row['Num Texts Found For Assessment'] = num_texts_found_for_synthesis
             result_row['Target Reference Text Length'] = len(target_reference_text_content)
             result_row['Target Reference PMIDs Used'] = sorted(list(target_pmids_for_eval_metrics)) # PMIDs used to look up text
+            result_row['Original Conclusion'] = original_conclusion # Include original conclusion for comparison
             if final_state:
                 result_row['Suitability Score'] = final_state.get('suitability_score', 0)
                 result_row['Suitability Assessment'] = final_state.get('suitability_assessment', 'N/A')

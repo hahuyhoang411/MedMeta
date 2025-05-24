@@ -46,6 +46,7 @@ class MetaAnalysisState(TypedDict):
     # --- New field for suitability assessment ---
     suitability_score: int | None  # Score 0-5 for target text suitability assessment
     suitability_assessment: str | None # Detailed assessment explanation
+    original_conclusion: str | None # Original human-written conclusion for target_text_suitability assessment
     # --- End new field ---
 
     # Temporary state for parallel execution (managed by LangGraph)

@@ -49,7 +49,7 @@ def decide_knowledge_path(state: MetaAnalysisState) -> str:
     - "llm_knowledge": Routes to answer questions using LLM's internal knowledge.
     - "retrieved_docs": Routes to generate search queries for document retrieval.
     - "target_text": Routes directly to synthesize conclusion using provided text.
-    - "target_text_suitability": Routes to assess suitability of target text for recreating conclusion.
+    Note: "target_text_suitability" is handled by direct routing from START.
     """
     logging.info("--- Router: decide_knowledge_path ---")
     synthesis_source = state.get("synthesis_input_source")
@@ -60,9 +60,6 @@ def decide_knowledge_path(state: MetaAnalysisState) -> str:
     elif synthesis_source == "target_text":
         logging.info("Path chosen: Use provided target reference text (synthesis_input_source='target_text'). Routing directly to synthesis.")
         return "synthesize_conclusion_direct" # New route name for clarity
-    elif synthesis_source == "target_text_suitability":
-        logging.info("Path chosen: Assess target text suitability (synthesis_input_source='target_text_suitability').")
-        return "assess_target_text_suitability"
     elif synthesis_source == "retrieved_docs":
         logging.info("Path chosen: Retrieve documents (synthesis_input_source='retrieved_docs').")
         return "generate_search_queries"
@@ -107,7 +104,15 @@ def build_graph(llm: BaseChatModel, retriever: Optional[ContextualCompressionRet
         graph_builder.add_node("synthesize_conclusion", lambda state: synthesize_conclusion(state, llm))
 
         # Define edges
-        graph_builder.add_edge(START, "generate_research_plan")
+        # Conditional edge from START: route directly to assessment for target_text_suitability, otherwise to research plan
+        graph_builder.add_conditional_edges(
+            START,
+            lambda state: "assess_target_text_suitability" if state.get("synthesis_input_source") == "target_text_suitability" else "generate_research_plan",
+            {
+                "assess_target_text_suitability": "assess_target_text_suitability",
+                "generate_research_plan": "generate_research_plan"
+            }
+        )
 
         # Conditional edge: After research plan, decide which knowledge path to take
         graph_builder.add_conditional_edges(
@@ -116,7 +121,6 @@ def build_graph(llm: BaseChatModel, retriever: Optional[ContextualCompressionRet
             {
                 "generate_search_queries": "generate_search_queries",
                 "answer_questions_with_llm": "answer_questions_with_llm",
-                "assess_target_text_suitability": "assess_target_text_suitability",
                 "synthesize_conclusion_direct": "synthesize_conclusion" # Added new route
             }
         )

@@ -135,13 +135,13 @@ def answer_questions_with_llm(state: MetaAnalysisState, llm: BaseChatModel) -> D
 def assess_target_text_suitability(state: MetaAnalysisState, llm: BaseChatModel) -> Dict[str, Any]:
     """
     Assesses whether the provided target reference text abstracts contain sufficient
-    information to recreate the original conclusion for the given research topic.
+    information to recreate the original conclusion from the MedMeta dataset.
     Returns a suitability score from 0-5 and detailed assessment.
     """
     logging.info("--- Node: assess_target_text_suitability ---")
     topic = state['research_topic']
-    plan = state.get('research_plan')
     target_text = state.get('target_reference_text')
+    original_conclusion = state.get('original_conclusion')
 
     if not target_text:
         logging.warning("No target reference text found for suitability assessment.")
@@ -150,37 +150,41 @@ def assess_target_text_suitability(state: MetaAnalysisState, llm: BaseChatModel)
             "suitability_assessment": "No target reference text was provided for assessment."
         }
 
-    key_questions_str = "N/A"
-    if plan and isinstance(plan, ResearchPlan) and plan.key_questions:
-        key_questions_str = "\n".join(f"- {q}" for q in plan.key_questions)
+    if not original_conclusion:
+        logging.warning("No original conclusion found for suitability assessment.")
+        return {
+            "suitability_score": 0,
+            "suitability_assessment": "No original conclusion was provided for assessment."
+        }
 
     prompt = ChatPromptTemplate.from_messages([
         ("system", 
-         "You are an expert research analyst tasked with evaluating the suitability of provided abstracts "
-         "for recreating an original research conclusion. Assess whether the given abstracts contain "
-         "sufficient information, evidence, and coverage to support recreating a comprehensive conclusion "
-         "on the specified research topic.\n\n"
+         "You are an expert research analyst tasked with evaluating whether provided abstracts "
+         "contain sufficient information to recreate a specific original conclusion from a meta-analysis. "
+         "Your task is to assess if someone could reasonably arrive at the same conclusion as the "
+         "original authors by reading only the provided abstracts.\n\n"
          "Provide your assessment as:\n"
-         "1. A detailed evaluation of your assessment, including:\n"
-         "   - What key information is present\n"
-         "   - What important information might be missing\n"
-         "   - Overall coverage of the research topic\n"
-         "   - Quality and relevance of the evidence provided\n\n"
+         "1. A detailed evaluation including:\n"
+         "   - What key information from the original conclusion is present in the abstracts\n"
+         "   - What important information from the original conclusion might be missing\n"
+         "   - Whether the abstracts provide sufficient evidence to support the original conclusion\n"
+         "   - Any gaps or limitations that would prevent recreating the original conclusion\n\n"
          "2. A score from 0-5 where:\n"
-         "   - 0 = Completely insufficient (0% confidence in recreating conclusion)\n"
-         "   - 1 = Very insufficient (20% confidence)\n"
-         "   - 2 = Insufficient (40% confidence)\n"
-         "   - 3 = Moderately sufficient (60% confidence)\n"
-         "   - 4 = Good sufficiency (80% confidence)\n"
-         "   - 5 = Excellent sufficiency (100% confidence - all needed information present)\n\n"
-         "Base your assessment solely on the provided abstracts."
+         "   - 0 = Completely insufficient - Cannot recreate conclusion (0% confidence)\n"
+         "   - 1 = Very insufficient - Major gaps prevent conclusion recreation (20% confidence)\n"
+         "   - 2 = Insufficient - Significant missing information (40% confidence)\n"
+         "   - 3 = Moderately sufficient - Some gaps but core elements present (60% confidence)\n"
+         "   - 4 = Good sufficiency - Minor gaps but conclusion is supportable (80% confidence)\n"
+         "   - 5 = Excellent sufficiency - All needed information present to recreate conclusion (100% confidence)\n\n"
+         "Focus specifically on whether the abstracts support the original conclusion's claims, "
+         "findings, and recommendations."
         ),
         ("human", 
          "Research Topic: {topic}\n\n"
-         "Key Research Questions (if available):\n{key_questions}\n\n"
+         "Original Conclusion (to be recreated):\n{original_conclusion}\n\n"
          "Target Reference Text Abstracts:\n{target_text}\n\n"
-         "Please assess the suitability of these abstracts for recreating a comprehensive conclusion "
-         "on the research topic. Provide both a detailed evaluation and numerical score (0-5)."
+         "Please assess whether these abstracts contain sufficient information to recreate "
+         "the original conclusion above. Provide both a detailed evaluation and numerical score (0-5)."
         )
     ])
 
@@ -188,7 +192,7 @@ def assess_target_text_suitability(state: MetaAnalysisState, llm: BaseChatModel)
         assessment_chain = prompt | llm
         response = assessment_chain.invoke({
             "topic": topic,
-            "key_questions": key_questions_str,
+            "original_conclusion": original_conclusion,
             "target_text": target_text
         })
         
