@@ -47,6 +47,10 @@ RETRIEVER_CONFIG = {
     "COMPRESSION_TOP_N": 5, # Number of documents after reranking
     "BGE_MODEL_NAME": BGE_MODEL_NAME,
     "RERANKER_MODEL_NAME": RERANKER_MODEL_NAME,
+    # FAISS persistence settings
+    "FAISS_INDEX_PATH": os.path.join(CACHE_DIR, "faiss_index"), # Path to save/load FAISS index
+    "FORCE_REEMBED": False, # Set to True to force re-embedding even if saved index exists
+    "SAVE_FAISS_INDEX": True, # Whether to save the FAISS index after creation
 }
 
 # --- LLM Settings ---

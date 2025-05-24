@@ -1,4 +1,7 @@
 import logging
+import os
+import hashlib
+import json
 from typing import List, Dict, Any, Optional
 
 from langchain_core.documents import Document
@@ -10,6 +13,90 @@ from langchain.retrievers.document_compressors import CrossEncoderReranker
 from langchain_community.cross_encoders import HuggingFaceCrossEncoder
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+def _generate_documents_hash(docs: List[Document]) -> str:
+    """
+    Generate a hash of the documents to detect changes.
+    
+    Args:
+        docs: List of LangChain Documents
+        
+    Returns:
+        SHA256 hash string representing the documents
+    """
+    # Create a consistent representation of documents for hashing
+    doc_data = []
+    for doc in docs:
+        doc_dict = {
+            'page_content': doc.page_content,
+            'metadata': dict(sorted(doc.metadata.items())) if doc.metadata else {}
+        }
+        doc_data.append(doc_dict)
+    
+    # Sort documents by page_content for consistent ordering
+    doc_data.sort(key=lambda x: x['page_content'])
+    
+    # Create hash
+    doc_string = json.dumps(doc_data, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(doc_string.encode('utf-8')).hexdigest()
+
+def _save_documents_metadata(faiss_index_path: str, docs_hash: str, num_docs: int):
+    """Save metadata about the documents used to create the FAISS index."""
+    metadata_path = f"{faiss_index_path}_metadata.json"
+    metadata = {
+        'documents_hash': docs_hash,
+        'num_documents': num_docs,
+        'created_at': os.path.getctime(faiss_index_path) if os.path.exists(faiss_index_path) else None
+    }
+    try:
+        with open(metadata_path, 'w') as f:
+            json.dump(metadata, f)
+    except Exception as e:
+        logging.warning(f"Failed to save documents metadata: {e}")
+
+def _load_documents_metadata(faiss_index_path: str) -> Dict[str, Any]:
+    """Load metadata about the documents used to create the FAISS index."""
+    metadata_path = f"{faiss_index_path}_metadata.json"
+    if os.path.exists(metadata_path):
+        try:
+            with open(metadata_path, 'r') as f:
+                return json.load(f)
+        except Exception as e:
+            logging.warning(f"Failed to load documents metadata: {e}")
+    return {}
+
+def _should_recreate_index(faiss_index_path: str, docs: List[Document], force_reembed: bool) -> bool:
+    """
+    Determine if we should recreate the FAISS index.
+    
+    Args:
+        faiss_index_path: Path to the FAISS index
+        docs: Current documents
+        force_reembed: Whether to force re-embedding
+        
+    Returns:
+        True if index should be recreated, False otherwise
+    """
+    if force_reembed:
+        logging.info("Force re-embedding is enabled.")
+        return True
+    
+    if not os.path.exists(faiss_index_path):
+        logging.info("FAISS index does not exist.")
+        return True
+    
+    # Check if documents have changed
+    current_docs_hash = _generate_documents_hash(docs)
+    saved_metadata = _load_documents_metadata(faiss_index_path)
+    saved_docs_hash = saved_metadata.get('documents_hash')
+    saved_num_docs = saved_metadata.get('num_documents', 0)
+    
+    if saved_docs_hash != current_docs_hash:
+        logging.info(f"Documents have changed (hash mismatch). Current docs: {len(docs)}, Saved docs: {saved_num_docs}")
+        return True
+    
+    logging.info(f"Documents unchanged (hash match). Using existing index with {saved_num_docs} documents.")
+    return False
 
 def setup_retrieval_chain(
     docs: List[Document],
@@ -65,9 +152,53 @@ def setup_retrieval_chain(
                 query_instruction="search_query:",
                 embed_instruction="search_document:"
             )
-            logging.info("Embeddings model loaded. Initializing FAISS vector store for Dense Retriever...")
-            # We still use FAISS as the backend, but refer to it as the dense retriever conceptually
-            faiss_vectorstore = FAISS.from_documents(docs, embeddings)
+            logging.info("Embeddings model loaded.")
+            
+            # FAISS persistence logic
+            faiss_index_path = config.get('FAISS_INDEX_PATH')
+            force_reembed = config.get('FORCE_REEMBED', False)
+            save_faiss_index = config.get('SAVE_FAISS_INDEX', True)
+            
+            faiss_vectorstore = None
+            
+            # Determine if we should recreate the index
+            should_recreate = _should_recreate_index(faiss_index_path, docs, force_reembed)
+            
+            # Try to load existing FAISS index if we don't need to recreate
+            if faiss_index_path and not should_recreate:
+                try:
+                    logging.info(f"Loading existing FAISS index from: {faiss_index_path}")
+                    faiss_vectorstore = FAISS.load_local(
+                        faiss_index_path, 
+                        embeddings, 
+                        allow_dangerous_deserialization=True
+                    )
+                    logging.info(f"Successfully loaded FAISS index with {faiss_vectorstore.index.ntotal} vectors.")
+                except Exception as e:
+                    logging.warning(f"Failed to load existing FAISS index: {e}. Creating new index from documents.")
+                    faiss_vectorstore = None
+            
+            # Create new FAISS index if loading failed or we need to recreate
+            if faiss_vectorstore is None:
+                logging.info("Creating new FAISS vector store from documents...")
+                faiss_vectorstore = FAISS.from_documents(docs, embeddings)
+                logging.info(f"FAISS vector store created with {faiss_vectorstore.index.ntotal} vectors.")
+                
+                # Save the FAISS index if requested and path is provided
+                if save_faiss_index and faiss_index_path:
+                    try:
+                        # Ensure the directory exists
+                        os.makedirs(os.path.dirname(faiss_index_path), exist_ok=True)
+                        faiss_vectorstore.save_local(faiss_index_path)
+                        logging.info(f"FAISS index saved to: {faiss_index_path}")
+                        
+                        # Save metadata about the documents
+                        docs_hash = _generate_documents_hash(docs)
+                        _save_documents_metadata(faiss_index_path, docs_hash, len(docs))
+                        logging.info(f"Documents metadata saved (hash: {docs_hash[:8]}..., count: {len(docs)})")
+                    except Exception as e:
+                        logging.warning(f"Failed to save FAISS index to {faiss_index_path}: {e}")
+            
             dense_retriever = faiss_vectorstore.as_retriever(search_kwargs={"k": config['DENSE_RETRIEVER_K']}) # Use new config key
             logging.info(f"Dense Retriever (FAISS backend) initialized (k={config['DENSE_RETRIEVER_K']}).")
             if retriever_mode == 'dense': # Changed from 'faiss'

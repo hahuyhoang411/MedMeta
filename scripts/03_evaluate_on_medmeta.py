@@ -17,6 +17,12 @@ from langchain.retrievers import ContextualCompressionRetriever
 # vllm serve Qwen/Qwen3-30B-A3B --enable-reasoning --reasoning-parser deepseek_r1 --tensor-parallel-size 8 --gpu-memory-utilization 0.8 --port 8001 --rope-scaling '{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768}' --max-model-len 65536 --enable-expert-parallel --guided-decoding-backend outlines
 # Then check the config file
 
+# FAISS Index Persistence:
+# This script now supports saving and loading FAISS embeddings to avoid re-embedding on every run.
+# The FAISS index will be saved to the path specified in config.RETRIEVER_CONFIG['FAISS_INDEX_PATH']
+# To force re-embedding (e.g., when documents change), use the --force_reembed flag
+# The system automatically detects document changes using content hashing
+
 # Ensure the src directory is in the Python path
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
@@ -142,11 +148,13 @@ def calculate_average_precision_at_k(ordered_retrieved_pmids: List[int], target_
     # Normalize by the total number of relevant documents (min(k, len(target_pmids)) is sometimes used, but standard is len(target_pmids))
     return ap_sum / len(target_pmids) if target_pmids else 0.0
     
-def setup_pipeline(synthesis_mode: str):
+def setup_pipeline(synthesis_mode: str, force_reembed: bool = False):
     """Consolidated setup function to prepare data, retrievers, LLM, and graph."""
     logging.info("--- Setting up RAG Pipeline for Evaluation ---")
     logging.info(f"Using device: {DEVICE}")
     logging.info(f"Selected synthesis mode: {synthesis_mode}")
+    if force_reembed:
+        logging.info("Force re-embedding is enabled - will recreate FAISS index even if it exists")
 
     compression_retriever: Optional[ContextualCompressionRetriever] = None
     reference_texts_df: Optional[pd.DataFrame] = None
@@ -175,7 +183,11 @@ def setup_pipeline(synthesis_mode: str):
         if not docs: raise RuntimeError("No documents loaded into LangChain format for RAG.")
         logging.info(f"Loaded {len(docs)} LangChain documents for RAG.")
 
-        compression_retriever = setup_retrieval_chain(docs, config=RETRIEVER_CONFIG, device=DEVICE)
+        # Create a copy of RETRIEVER_CONFIG and update force_reembed setting
+        retriever_config = RETRIEVER_CONFIG.copy()
+        retriever_config['FORCE_REEMBED'] = force_reembed
+        
+        compression_retriever = setup_retrieval_chain(docs, config=retriever_config, device=DEVICE)
         if compression_retriever is None: raise RuntimeError("Failed to setup retrieval chain for document retrieval path.")
 
     elif synthesis_mode == "target_text":
@@ -219,7 +231,7 @@ def setup_pipeline(synthesis_mode: str):
     logging.info("--- Pipeline Setup Complete ---")
     return app, reference_texts_df # Return both
 
-def main(eval_file: str, output_file: str, max_rows: Optional[int], wait_time: int, synthesis_mode: str):
+def main(eval_file: str, output_file: str, max_rows: Optional[int], wait_time: int, synthesis_mode: str, force_reembed: bool = False):
     """
     Main function to run evaluation on the MedMeta dataset.
 
@@ -229,6 +241,7 @@ def main(eval_file: str, output_file: str, max_rows: Optional[int], wait_time: i
         max_rows: Maximum number of rows to process from eval_file (None for all).
         wait_time: Seconds to wait between processing rows (for API rate limits).
         synthesis_mode: The synthesis mode to use ('retrieval', 'llm_knowledge', 'target_text').
+        force_reembed: Whether to force re-embedding even if saved FAISS index exists.
     """
     eval_start_time = time.time()
     k_value = RETRIEVER_CONFIG.get('COMPRESSION_TOP_N', 5) # Define K for metrics
@@ -239,7 +252,7 @@ def main(eval_file: str, output_file: str, max_rows: Optional[int], wait_time: i
 
     # --- Setup the Pipeline ---
     try:
-        app, reference_texts_df = setup_pipeline(synthesis_mode=synthesis_mode) # Unpack both
+        app, reference_texts_df = setup_pipeline(synthesis_mode=synthesis_mode, force_reembed=force_reembed) # Unpack both
     except RuntimeError as e:
         logging.error(f"Pipeline setup failed: {e}. Exiting.")
         return
@@ -522,6 +535,11 @@ if __name__ == "__main__":
         choices=["retrieval", "llm_knowledge", "target_text"],
         help="The synthesis mode to use: 'retrieval' (RAG), 'llm_knowledge' (LLM internal), or 'target_text' (direct input)."
     )
+    parser.add_argument(
+        "--force_reembed",
+        action="store_true",
+        help="Force re-embedding even if a saved FAISS index exists. Useful when you want to recreate the index."
+    )
 
     args = parser.parse_args()
 
@@ -536,10 +554,13 @@ if __name__ == "__main__":
         output_file=args.output,
         max_rows=args.max_rows,
         wait_time=args.wait,
-        synthesis_mode=args.synthesis_mode # Pass the new argument
+        synthesis_mode=args.synthesis_mode, # Pass the new argument
+        force_reembed=args.force_reembed # Pass the new argument
     )
 
     # Example Usage:
     # python scripts/03_evaluate_on_medmeta.py --synthesis_mode retrieval
     # python scripts/03_evaluate_on_medmeta.py --synthesis_mode llm_knowledge --max_rows 5
     # python scripts/03_evaluate_on_medmeta.py --synthesis_mode target_text --eval_file path/to/medmeta_eval.csv # Assumes FETCHED_DATA_CSV_PATH is correctly set in config
+    # python scripts/03_evaluate_on_medmeta.py --synthesis_mode retrieval --force_reembed  # Force re-embedding of FAISS index
+    # python scripts/03_evaluate_on_medmeta.py --synthesis_mode retrieval --max_rows 10 --force_reembed  # Re-embed and test on 10 rows
