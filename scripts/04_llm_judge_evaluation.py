@@ -109,6 +109,14 @@ JUDGE_CONFIGS = [
         "max_tokens": 8192, # Adjust if needed
         "temperature": 0.0,
         "api_base": None, # Not needed for OpenRouter API
+    },
+    {
+        "name": "DeepSeek-R1-0528",
+        "model": "deepinfra/deepseek-ai/DeepSeek-R1-0528", # Use latest flash
+        "api_key_env_var": "DEEPINFRA_API_KEY",
+        "max_tokens": 8192, # Adjust if needed
+        "temperature": 0.0,
+        "api_base": None, # Not needed for OpenRouter API
     }
     # Add more judges here if needed
     # {
@@ -337,7 +345,7 @@ Score: [Your score from 0-5]
 
 # --- Main Function ---
 
-def main(input_file: str, output_file: str, max_rows: Optional[int], wait_time: int):
+def main(input_file: str, output_file: str, max_rows: Optional[int], wait_time: int, resume: bool = False):
     """
     Main function to load evaluation results, get LLM judgments from multiple judges,
     calculate mean scores, and save.
@@ -347,6 +355,7 @@ def main(input_file: str, output_file: str, max_rows: Optional[int], wait_time: 
         output_file: Path to save the LLM-judged evaluation results CSV.
         max_rows: Maximum number of rows to process (None for all).
         wait_time: Seconds to wait between LLM calls *for each judge* (for rate limits).
+        resume: If True, resume from existing judged results file and fill missing scores.
     """
     judge_start_time = time.time()
 
@@ -365,7 +374,6 @@ def main(input_file: str, output_file: str, max_rows: Optional[int], wait_time: 
             processed_env_vars.add(api_key_env)
     logging.info("Finished pre-fetching API keys.")
 
-
     # --- Load Evaluation Data ---
     logging.info(f"Loading evaluation results from: {input_file}")
     if not os.path.exists(input_file):
@@ -378,6 +386,39 @@ def main(input_file: str, output_file: str, max_rows: Optional[int], wait_time: 
         logging.error(f"Failed to load evaluation CSV: {e}", exc_info=True)
         return
 
+    # --- Handle Resume Mode ---
+    df_existing = None
+    if resume and os.path.exists(output_file):
+        logging.info(f"Resume mode enabled. Loading existing judged results from: {output_file}")
+        try:
+            df_existing = pd.read_csv(output_file)
+            logging.info(f"Loaded existing judged results with {len(df_existing)} rows.")
+            
+            # Validate that the existing file is compatible
+            if len(df_existing) != len(df_eval):
+                logging.warning(f"Row count mismatch: input has {len(df_eval)} rows, existing has {len(df_existing)} rows.")
+                logging.warning("Will proceed but ensure the files are compatible.")
+            
+            # Initialize df_eval with existing data if columns exist
+            judge_score_cols = [f"{cfg['name']}_Score" for cfg in JUDGE_CONFIGS]
+            judge_reasoning_cols = [f"{cfg['name']}_Reasoning" for cfg in JUDGE_CONFIGS]
+            
+            for col in judge_score_cols + judge_reasoning_cols + ['Mean LLM Judge Score']:
+                if col in df_existing.columns:
+                    if col not in df_eval.columns:
+                        df_eval[col] = None
+                    # Copy existing values, but only for rows that exist in both files
+                    min_rows = min(len(df_eval), len(df_existing))
+                    df_eval.loc[:min_rows-1, col] = df_existing.loc[:min_rows-1, col]
+                        
+        except Exception as e:
+            logging.error(f"Failed to load existing judged results: {e}. Will start fresh.")
+            df_existing = None
+            resume = False
+    elif resume:
+        logging.warning(f"Resume mode enabled but output file {output_file} doesn't exist. Starting fresh.")
+        resume = False
+
     # Limit rows if specified
     if max_rows is not None and max_rows > 0:
         logging.warning(f"Processing only the first {max_rows} rows for LLM judgment.")
@@ -387,94 +428,112 @@ def main(input_file: str, output_file: str, max_rows: Optional[int], wait_time: 
          return
 
     num_rows_to_process = len(df_eval)
-    # Store aggregated results per row
-    aggregated_scores = []
-    # Store individual judge results per row (optional, for detailed analysis)
-    individual_judge_results: Dict[str, List[Optional[Any]]] = {f"{cfg['name']}_Score": [] for cfg in JUDGE_CONFIGS}
-    individual_judge_results.update({f"{cfg['name']}_Reasoning": [] for cfg in JUDGE_CONFIGS})
-
+    
+    # Initialize columns if they don't exist
+    if 'Mean LLM Judge Score' not in df_eval.columns:
+        df_eval['Mean LLM Judge Score'] = None
+        
+    for cfg in JUDGE_CONFIGS:
+        score_col = f"{cfg['name']}_Score"
+        reasoning_col = f"{cfg['name']}_Reasoning"
+        if score_col not in df_eval.columns:
+            df_eval[score_col] = None
+        if reasoning_col not in df_eval.columns:
+            df_eval[reasoning_col] = None
 
     # --- Process Each Row ---
     logging.info(f"Starting LLM judgment loop for {num_rows_to_process} rows using {len(JUDGE_CONFIGS)} judges...")
+    
+    total_missing_judgments = 0
+    rows_with_missing_data = 0
+    
     for index, row in tqdm(df_eval.iterrows(), total=num_rows_to_process, desc="Judging Rows"):
         start_row_time = time.time()
         original_number = row.get('Number', f'Index_{index}') # For logging
-
-        logging.info(f"\n--- Judging Row {index+1}/{num_rows_to_process} (Number: {original_number}) ---")
-
-        row_scores = [None] * len(JUDGE_CONFIGS) # Initialize with Nones to preserve order
-        row_reasonings = [None] * len(JUDGE_CONFIGS) # Initialize with Nones
 
         # Skip rows where the original conclusion was skipped or errored
         if str(row.get('Generated Conclusion', '')).startswith('Skipped') or \
            str(row.get('Generated Conclusion', '')).startswith('Error'):
             logging.warning(f"Skipping LLM judgment for row {index+1} due to previous skip/error.")
-            mean_score = None
-            combined_reasoning = "Skipped - Prior Error/Skip"
-            for i, cfg in enumerate(JUDGE_CONFIGS):
-                 # No need to append to row_scores/row_reasonings here, they remain None
-                 individual_judge_results[f"{cfg['name']}_Score"].append(None)
-                 individual_judge_results[f"{cfg['name']}_Reasoning"].append("Skipped - Prior Error/Skip")
-        else:
-            # --- Parallel execution for judges ---
-            with ThreadPoolExecutor(max_workers=len(JUDGE_CONFIGS)) as executor:
-                future_to_judge_idx = {}
-                for judge_idx, judge_config in enumerate(JUDGE_CONFIGS):
-                    judge_name = judge_config.get("name", f"Judge_{judge_idx}")
-                    logging.info(f"--- Submitting task for Judge {judge_idx+1}/{len(JUDGE_CONFIGS)}: {judge_name} for row {index+1} ---")
-                    future = executor.submit(get_llm_judgment, row, judge_config)
-                    future_to_judge_idx[future] = judge_idx
+            if pd.isna(df_eval.loc[index, 'Mean LLM Judge Score']):
+                df_eval.loc[index, 'Mean LLM Judge Score'] = None
+            for cfg in JUDGE_CONFIGS:
+                if pd.isna(df_eval.loc[index, f"{cfg['name']}_Score"]):
+                    df_eval.loc[index, f"{cfg['name']}_Score"] = None
+                    df_eval.loc[index, f"{cfg['name']}_Reasoning"] = "Skipped - Prior Error/Skip"
+            continue
 
-                for future in future_to_judge_idx:
-                    judge_idx = future_to_judge_idx[future]
-                    judge_config = JUDGE_CONFIGS[judge_idx]
+        # Check which judges need to be called for this row
+        judges_to_process = []
+        for judge_idx, judge_config in enumerate(JUDGE_CONFIGS):
+            score_col = f"{judge_config['name']}_Score"
+            reasoning_col = f"{judge_config['name']}_Reasoning"
+            
+            # Check if this judge's score is missing or invalid
+            current_score = df_eval.loc[index, score_col]
+            current_reasoning = df_eval.loc[index, reasoning_col]
+            
+            if pd.isna(current_score) or current_score is None or \
+               pd.isna(current_reasoning) or current_reasoning is None or \
+               str(current_reasoning).startswith('Error'):
+                judges_to_process.append((judge_idx, judge_config))
+                total_missing_judgments += 1
+
+        if not judges_to_process:
+            logging.info(f"Row {index+1}/{num_rows_to_process} (Number: {original_number}) - All judges already completed. Skipping.")
+            continue
+            
+        rows_with_missing_data += 1
+        logging.info(f"\n--- Judging Row {index+1}/{num_rows_to_process} (Number: {original_number}) ---")
+        logging.info(f"Need to process {len(judges_to_process)} judges: {[cfg['name'] for _, cfg in judges_to_process]}")
+
+        # --- Parallel execution for missing judges only ---
+        if judges_to_process:
+            with ThreadPoolExecutor(max_workers=len(judges_to_process)) as executor:
+                future_to_judge_info = {}
+                for judge_idx, judge_config in judges_to_process:
+                    judge_name = judge_config.get("name", f"Judge_{judge_idx}")
+                    logging.info(f"--- Submitting task for Judge {judge_name} for row {index+1} ---")
+                    future = executor.submit(get_llm_judgment, row, judge_config)
+                    future_to_judge_info[future] = (judge_idx, judge_config)
+
+                for future in future_to_judge_info:
+                    judge_idx, judge_config = future_to_judge_info[future]
                     judge_name = judge_config.get("name", f"Judge_{judge_idx}")
                     try:
                         score, reasoning = future.result() # Blocks until this judge completes
-                        row_scores[judge_idx] = score
-                        row_reasonings[judge_idx] = reasoning
-                        individual_judge_results[f"{judge_name}_Score"].append(score)
-                        individual_judge_results[f"{judge_name}_Reasoning"].append(reasoning)
+                        df_eval.loc[index, f"{judge_name}_Score"] = score
+                        df_eval.loc[index, f"{judge_name}_Reasoning"] = reasoning
                         logging.info(f"Judge {judge_name} for row {index+1} finished. Score: {score}")
                     except Exception as exc:
                         logging.error(f"Judge {judge_name} for row {index+1} generated an exception: {exc}")
-                        # row_scores[judge_idx] and row_reasonings[judge_idx] remain None
-                        individual_judge_results[f"{judge_name}_Score"].append(None)
-                        individual_judge_results[f"{judge_name}_Reasoning"].append(f"Error during judgment: {exc}")
+                        df_eval.loc[index, f"{judge_name}_Score"] = None
+                        df_eval.loc[index, f"{judge_name}_Reasoning"] = f"Error during judgment: {exc}"
 
-
-            # --- End of judges processing for the row ---
-
-            # Calculate mean score for the row, ignoring None values
-            valid_scores = [s for s in row_scores if s is not None]
-            mean_score = np.mean(valid_scores) if valid_scores else None
-
-            # Combine reasonings (simple join)
-            combined_reasoning = "\n---\n".join(str(r) for r in row_reasonings if r is not None)
-
-        aggregated_scores.append(mean_score)
+        # Recalculate mean score for this row
+        row_scores = []
+        for cfg in JUDGE_CONFIGS:
+            score = df_eval.loc[index, f"{cfg['name']}_Score"]
+            if pd.notna(score) and score is not None:
+                row_scores.append(score)
+        
+        mean_score = np.mean(row_scores) if row_scores else None
+        df_eval.loc[index, 'Mean LLM Judge Score'] = mean_score
 
         end_row_time = time.time()
-        logging.info(f"Row {index+1} judged by all judges in {end_row_time - start_row_time:.2f} seconds. Mean Score: {mean_score if mean_score is not None else 'N/A'}")
+        logging.info(f"Row {index+1} judged in {end_row_time - start_row_time:.2f} seconds. Mean Score: {mean_score if mean_score is not None else 'N/A'}")
 
         # Optional: Wait between rows (if judges have shared rate limits or to reduce load)
-        if wait_time > 0 and index < num_rows_to_process - 1:
+        if wait_time > 0 and index < num_rows_to_process - 1 and judges_to_process:
             logging.info(f"Waiting for {wait_time} seconds before next row...")
             time.sleep(wait_time)
 
-    # --- Add results and Save ---
+    # --- Save Results ---
     logging.info("LLM judgment loop finished.")
-    df_eval['Mean LLM Judge Score'] = aggregated_scores
-
-    # Add individual judge results to the DataFrame
-    for col_name, results_list in individual_judge_results.items():
-         # Ensure list length matches DataFrame length (important if max_rows was used)
-         if len(results_list) == len(df_eval):
-              df_eval[col_name] = results_list
-         else:
-              logging.error(f"Length mismatch for column {col_name}. Expected {len(df_eval)}, got {len(results_list)}. Skipping column.")
-
-
+    
+    if resume:
+        logging.info(f"Resume mode: Processed {rows_with_missing_data} rows with missing data ({total_missing_judgments} missing judgments total).")
+    
     logging.info(f"Saving multi-judged evaluation results to {output_file}...")
     try:
         # Ensure output directory exists
@@ -497,6 +556,11 @@ def main(input_file: str, output_file: str, max_rows: Optional[int], wait_time: 
                   avg_judge_score = df_eval[judge_score_col].mean()
                   print(f"  - {cfg['name']}: {avg_judge_score:.2f}" if not pd.isna(avg_judge_score) else f"  - {cfg['name']}: N/A")
 
+        # Print missing data summary
+        if resume:
+            print(f"\nResume Summary:")
+            print(f"  - Rows with missing data processed: {rows_with_missing_data}")
+            print(f"  - Total missing judgments filled: {total_missing_judgments}")
 
     except Exception as e:
         logging.error(f"Failed to save judged evaluation results: {e}", exc_info=True)
@@ -529,6 +593,11 @@ if __name__ == "__main__":
         default=2, # Reduced default wait time between *judge* calls
         help="Seconds to wait between LLM API calls for each judge (adjust for rate limits)."
     )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="If set, resume from existing judged results file and fill missing scores."
+    )
 
 
     args = parser.parse_args()
@@ -537,7 +606,8 @@ if __name__ == "__main__":
         input_file=args.input_file,
         output_file=args.output_file,
         max_rows=args.max_rows,
-        wait_time=args.wait_time
+        wait_time=args.wait_time,
+        resume=args.resume
     )
 
 # Ensure to host vLLM server before running this script
@@ -550,3 +620,6 @@ if __name__ == "__main__":
 
 # Example usage from command line:
 # python scripts/04_llm_judge_evaluation.py --input_file ../output/hybrid.csv --output_file ../output/judged_results.csv --max_rows 20 --wait_time 30
+# 
+# To resume from existing judged results and fill missing scores:
+# python scripts/04_llm_judge_evaluation.py --input_file ../output/hybrid.csv --output_file ../output/judged_results.csv --resume --wait_time 30
