@@ -646,7 +646,7 @@ if __name__ == "__main__":
     )
 
     # Example Usage:
-    # python scripts/03_evaluate_on_medmeta.py --synthesis_mode retrieval
+    # python scripts/03_evaluate_on_medmeta.py --synthesis_mode retrieval --wait 2
     # python scripts/03_evaluate_on_medmeta.py --synthesis_mode llm_knowledge --max_rows 5
     # python scripts/03_evaluate_on_medmeta.py --synthesis_mode target_text --eval_file path/to/medmeta_eval.csv # Assumes FETCHED_DATA_CSV_PATH is correctly set in config
     # python scripts/03_evaluate_on_medmeta.py --synthesis_mode target_text_suitability --eval_file path/to/medmeta_eval.csv # Assess suitability of target texts
