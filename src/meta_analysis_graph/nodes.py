@@ -345,14 +345,24 @@ def synthesize_conclusion(state: MetaAnalysisState, llm: BaseChatModel) -> Dict[
         return {"final_conclusion": "Invalid input source specified for synthesis."}
 
     prompt_template_str = (
-        "You are a research analyst tasked with creating the final concluding summary for a meta-analysis or systematic review. "
-        "Based *only* on the provided context, synthesize a concise wrap-up conclusion. "
-        "This conclusion should address the key research questions (if available), identify major themes, consistent findings, discrepancies, or gaps mentioned. "
-        "Frame your response as a final summary of the evidence or information presented in the context. Do not add external knowledge."
+        "You are a research analyst tasked with drafting the **primary concluding statement** "
+        "for a meta-analysis or systematic review. Your goal is to distill the provided context "
+        "into the **single most important and specific takeaway message**, as if you were presenting "
+        "the main result of the study.\n\n"
+        "Based *strictly* on the provided context:\n"
+        "1. Identify the **central, affirmative findings** or **key definitive statements** made. "
+        "What is the most crucial outcome, comparison, or result reported?\n"
+        "2. Capture any **critical quantifications, effect sizes, or specific comparisons** "
+        "that are central to this main finding.\n"
+        "3. Include any **essential caveats, limitations, or conditions** that are "
+        "directly tied to and qualify this primary finding.\n"
+        "4. The conclusion should be **highly focused and concise**, reflecting the punchline "
+        "of the research. Avoid general summaries of the entire field or background "
+        "information from the context.\n"
+        "5. Do not introduce external knowledge or comment on the completeness of the provided context."
         "\n\nResearch Topic: {topic}"
-        "\n\nResearch Plan Key Questions:\n{key_questions}"
         f"\n\n{synthesis_input_type}:\n{{context}}"
-        "\n\nSynthesize a concise conclusion based *only* on the provided context:"
+        "\n\nSynthesize the primary concluding statement based *only* on the provided context, focusing on the most direct and impactful findings:"
     )
 
     prompt = ChatPromptTemplate.from_messages([
