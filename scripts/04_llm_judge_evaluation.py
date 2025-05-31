@@ -110,14 +110,14 @@ JUDGE_CONFIGS = [
         "temperature": 0.0,
         "api_base": None, # Not needed for OpenRouter API
     },
-    {
-        "name": "DeepSeek-R1-0528",
-        "model": "deepinfra/deepseek-ai/DeepSeek-R1-0528", # Use latest flash
-        "api_key_env_var": "DEEPINFRA_API_KEY",
-        "max_tokens": 8192, # Adjust if needed
-        "temperature": 0.0,
-        "api_base": None, # Not needed for OpenRouter API
-    }
+    # {
+    #     "name": "DeepSeek-R1-0528",
+    #     "model": "deepinfra/deepseek-ai/DeepSeek-R1-0528", # Use latest flash
+    #     "api_key_env_var": "DEEPINFRA_API_KEY",
+    #     "max_tokens": 8192, # Adjust if needed
+    #     "temperature": 0.0,
+    #     "api_base": None, # Not needed for OpenRouter API
+    # }
     # Add more judges here if needed
     # {
     #     "name": "Another-Model",
