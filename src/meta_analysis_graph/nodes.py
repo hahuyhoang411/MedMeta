@@ -303,13 +303,18 @@ def synthesize_conclusion(state: MetaAnalysisState, llm: BaseChatModel) -> Dict[
     if synthesis_source == "llm_knowledge":
         logging.info("Synthesizing conclusion from LLM-generated answers.")
         llm_answers = state.get('llm_generated_answers', [])
-        if not llm_answers:
+        additional_answers = state.get('additional_answers', [])
+        
+        # Combine original and additional answers if available
+        all_answers = llm_answers + (additional_answers or [])
+        
+        if not all_answers:
             logging.warning("No LLM-generated answers found to synthesize a conclusion (source: llm_knowledge).")
             return {"final_conclusion": "No LLM-generated answers were available to synthesize a conclusion."}
 
         context_string = "\n\n---\n\n".join(
             [f"Question: {ans['question']}\nAnswer:\n{ans['comprehensive_answer']}"
-             for ans in llm_answers]
+             for ans in all_answers]
         )
         synthesis_input_type = "LLM-Generated Answers to Research Questions"
     elif synthesis_source == "target_text":
@@ -383,3 +388,244 @@ def synthesize_conclusion(state: MetaAnalysisState, llm: BaseChatModel) -> Dict[
     except Exception as e:
         logging.error(f"Error during conclusion synthesis: {e}", exc_info=True)
         return {"final_conclusion": "Error occurred during synthesis."}
+
+
+def evaluate_conclusion_match(state: MetaAnalysisState, llm: BaseChatModel) -> Dict[str, Any]:
+    """
+    Evaluates whether the generated conclusion adequately matches and addresses the research topic.
+    Returns a score from 0-5 and detailed feedback.
+    """
+    logging.info("--- Node: evaluate_conclusion_match ---")
+    topic = state['research_topic']
+    conclusion = state.get('final_conclusion')
+    plan = state.get('research_plan')
+    
+    if not conclusion:
+        logging.warning("No conclusion found for evaluation.")
+        return {
+            "conclusion_evaluation_score": 0,
+            "conclusion_evaluation_feedback": "No conclusion was provided for evaluation."
+        }
+    
+    # Include research plan context if available
+    plan_context = ""
+    if plan and isinstance(plan, ResearchPlan):
+        plan_context = f"\nResearch Plan Background: {plan.background}\nKey Questions: {', '.join(plan.key_questions)}"
+    
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", 
+         "You are an expert research evaluator tasked with assessing whether a generated conclusion "
+         "adequately addresses and matches the given research topic. Your evaluation should consider:\n\n"
+         "1. **Topic Relevance**: Does the conclusion directly address the research topic?\n"
+         "2. **Comprehensiveness**: Does the conclusion cover the key aspects expected for this topic?\n"
+         "3. **Specificity**: Is the conclusion specific enough to be meaningful for the research topic?\n"
+         "4. **Coherence**: Is the conclusion logically coherent with respect to the topic?\n"
+         "5. **Completeness**: Does the conclusion feel complete for addressing the research topic?\n\n"
+         "Provide your assessment as:\n"
+         "1. A detailed evaluation explaining what works well and what might be missing or inadequate\n"
+         "2. A score from 0-5 where:\n"
+         "   - 0 = Completely inadequate - Does not address the topic (0% match)\n"
+         "   - 1 = Very inadequate - Major gaps in addressing the topic (20% match)\n"
+         "   - 2 = Inadequate - Significant missing aspects (40% match)\n"
+         "   - 3 = Moderately adequate - Some gaps but core topic addressed (60% match)\n"
+         "   - 4 = Good - Minor gaps but well addresses the topic (80% match)\n"
+         "   - 5 = Excellent - Comprehensively and specifically addresses the topic (100% match)\n\n"
+         "Focus on whether the conclusion is sufficient for someone researching this specific topic."
+        ),
+        ("human", 
+         "Research Topic: {topic}{plan_context}\n\n"
+         "Generated Conclusion:\n{conclusion}\n\n"
+         "Please evaluate whether this conclusion adequately matches and addresses the research topic. "
+         "Provide both a detailed evaluation and numerical score (0-5)."
+        )
+    ])
+    
+    try:
+        evaluation_chain = prompt | llm
+        response = evaluation_chain.invoke({
+            "topic": topic,
+            "plan_context": plan_context,
+            "conclusion": conclusion
+        })
+        
+        evaluation_text = response.content
+        
+        # Extract score from the response (similar to assess_target_text_suitability)
+        import re
+        extracted_score = None
+        
+        # Method 1: Look for "Score:" or "Rating:" followed by a number
+        score_patterns = [
+            r'(?:score|rating)\s*:?\s*\n*\s*([0-5])',
+            r'(?:score|rating)\s*:?\s*\n*\s*([0-5])\s*/\s*5',
+            r'(?:score|rating)\s*:?\s*\n*\s*([0-5])\s*out\s*of\s*5',
+        ]
+        
+        for pattern in score_patterns:
+            match = re.search(pattern, evaluation_text.lower())
+            if match:
+                try:
+                    extracted_score = int(match.group(1))
+                    break
+                except (ValueError, IndexError):
+                    continue
+        
+        # Method 2: Look for standalone numbers with score context
+        if extracted_score is None:
+            context_patterns = [
+                r'(?:score|rating|assign|give|rate)\s*(?:is|of)?\s*:?\s*\n*\s*([0-5])',
+                r'([0-5])\s*/\s*5',
+                r'([0-5])\s*out\s*of\s*5',
+            ]
+            
+            for pattern in context_patterns:
+                matches = re.findall(pattern, evaluation_text.lower())
+                if matches:
+                    try:
+                        extracted_score = int(matches[-1])
+                        break
+                    except (ValueError, IndexError):
+                        continue
+        
+        # Method 3: Fallback - look at last few lines for standalone number
+        if extracted_score is None:
+            lines = evaluation_text.strip().split('\n')
+            for line in reversed(lines[-5:]):
+                line = line.strip()
+                if line and re.match(r'^[0-5]$', line):
+                    try:
+                        extracted_score = int(line)
+                        break
+                    except ValueError:
+                        continue
+        
+        # Ensure score is within valid range, default to 0 if still None
+        extracted_score = max(0, min(5, extracted_score)) if extracted_score is not None else 0
+        
+        logging.info(f"Conclusion evaluation completed. Score: {extracted_score}/5")
+        logging.info(f"Evaluation preview: {evaluation_text[:200]}...")
+        
+        return {
+            "conclusion_evaluation_score": extracted_score,
+            "conclusion_evaluation_feedback": evaluation_text
+        }
+        
+    except Exception as e:
+        logging.error(f"Error during conclusion evaluation: {e}", exc_info=True)
+        return {
+            "conclusion_evaluation_score": 0,
+            "conclusion_evaluation_feedback": f"Error occurred during evaluation: {e}"
+        }
+
+
+def generate_additional_questions(state: MetaAnalysisState, llm: BaseChatModel) -> Dict[str, Any]:
+    """
+    Generates 5 additional sub-questions that are different from the original ones
+    to improve the conclusion when evaluation shows inadequate topic matching.
+    """
+    logging.info("--- Node: generate_additional_questions ---")
+    topic = state['research_topic']
+    plan = state.get('research_plan')
+    original_questions = []
+    
+    if plan and isinstance(plan, ResearchPlan):
+        original_questions = plan.key_questions
+    
+    # Get evaluation feedback to understand what was missing
+    evaluation_feedback = state.get('conclusion_evaluation_feedback', '')
+    
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", 
+         "You are a research assistant expert at formulating targeted research questions. "
+         "Given a research topic, original questions that were already asked, and feedback about "
+         "what was missing from the initial conclusion, generate 5 NEW and DIFFERENT sub-questions "
+         "that will help address the gaps and improve understanding of the research topic.\n\n"
+         "Your new questions should:\n"
+         "1. Be completely different from the original questions\n"
+         "2. Address specific gaps mentioned in the evaluation feedback\n"
+         "3. Explore different angles, perspectives, or aspects of the topic\n"
+         "4. Be specific and actionable for research purposes\n"
+         "5. Help fill in missing information to better address the research topic"
+        ),
+        ("human", 
+         "Research Topic: {topic}\n\n"
+         "Original Questions Already Asked:\n{original_questions}\n\n"
+         "Evaluation Feedback (what was missing/inadequate):\n{evaluation_feedback}\n\n"
+         "Generate 5 NEW sub-questions that are different from the original ones and will help "
+         "address the gaps identified in the evaluation feedback:"
+        )
+    ])
+    
+    try:
+        original_questions_str = "\n".join(f"- {q}" for q in original_questions) if original_questions else "None"
+        
+        question_chain = prompt | llm.with_structured_output(SearchQueries)
+        response = question_chain.invoke({
+            "topic": topic,
+            "original_questions": original_questions_str,
+            "evaluation_feedback": evaluation_feedback
+        })
+        
+        additional_questions = response.queries if response else []
+        
+        # Filter out empty strings and ensure we have valid questions
+        valid_questions = [q for q in additional_questions if q and q.strip()]
+        
+        logging.info(f"Generated {len(valid_questions)} additional questions: {valid_questions}")
+        
+        return {
+            "additional_questions": valid_questions,
+            "is_second_iteration": True  # Mark that we're in the second iteration
+        }
+        
+    except Exception as e:
+        logging.error(f"Error generating additional questions: {e}", exc_info=True)
+        return {
+            "additional_questions": [],
+            "is_second_iteration": True
+        }
+
+
+def answer_additional_questions_with_llm(state: MetaAnalysisState, llm: BaseChatModel) -> Dict[str, Any]:
+    """
+    Uses the LLM's internal knowledge to answer the additional questions generated
+    to address gaps in the initial conclusion.
+    """
+    logging.info("--- Node: answer_additional_questions_with_llm ---")
+    additional_questions = state.get('additional_questions', [])
+    
+    if not additional_questions:
+        logging.warning("No additional questions found to answer.")
+        return {"additional_answers": []}
+    
+    answered_questions: List[LLMAnsweredQuestion] = []
+    
+    for question in additional_questions:
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", 
+             "You are an expert researcher with broad knowledge. For the given research question, "
+             "provide a comprehensive answer based on your internal knowledge. This question was "
+             "specifically generated to address gaps in understanding of the research topic, so focus "
+             "on providing detailed, specific information that will help fill those gaps. "
+             "If applicable, include relevant details, examples, or sub-aspects within your response."
+            ),
+            ("human", "Research Question: {question}")
+        ])
+        
+        try:
+            answer_chain = prompt | llm
+            response = answer_chain.invoke({"question": question})
+            answered_questions.append({
+                "question": question,
+                "comprehensive_answer": response.content
+            })
+            logging.info(f"LLM answered additional question: '{question}'")
+        except Exception as e:
+            logging.error(f"Error answering additional question '{question}' with LLM: {e}", exc_info=True)
+            answered_questions.append({
+                "question": question,
+                "comprehensive_answer": f"Error generating answer for this question: {e}"
+            })
+    
+    logging.info(f"Completed answering {len(answered_questions)} additional questions.")
+    return {"additional_answers": answered_questions}
