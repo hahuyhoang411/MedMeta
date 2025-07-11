@@ -14,7 +14,10 @@ from .nodes import (
     retrieve_documents,
     synthesize_conclusion,
     answer_questions_with_llm,
-    assess_target_text_suitability
+    assess_target_text_suitability,
+    evaluate_conclusion_match,
+    generate_additional_questions,
+    answer_additional_questions_with_llm
 )
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -74,6 +77,29 @@ def decide_knowledge_path(state: MetaAnalysisState) -> str:
         # state['synthesis_input_source'] = "retrieved_docs" # This modification should be done carefully or in entry point
         return "generate_search_queries"
 
+
+def decide_evaluation_path(state: MetaAnalysisState) -> str:
+    """
+    Decides whether the conclusion is adequate or needs improvement through additional questions.
+    Routes based on the evaluation score and whether we're already in the second iteration.
+    """
+    logging.info("--- Router: decide_evaluation_path ---")
+    evaluation_score = state.get('conclusion_evaluation_score', 0)
+    is_second_iteration = state.get('is_second_iteration', False)
+    
+    # If we're already in the second iteration, don't loop again to prevent infinite loops
+    if is_second_iteration:
+        logging.info("Second iteration completed. Ending process regardless of score.")
+        return "end"
+    
+    # If score is 3 or higher (60%+), consider it adequate
+    if evaluation_score >= 3:
+        logging.info(f"Evaluation score {evaluation_score}/5 is adequate. Ending process.")
+        return "end"
+    else:
+        logging.info(f"Evaluation score {evaluation_score}/5 is inadequate. Generating additional questions.")
+        return "generate_additional_questions"
+
 # --- Build the Graph ---
 
 def build_graph(llm: BaseChatModel, retriever: Optional[ContextualCompressionRetriever]) -> Optional[StateGraph]:
@@ -102,6 +128,11 @@ def build_graph(llm: BaseChatModel, retriever: Optional[ContextualCompressionRet
         graph_builder.add_node("answer_questions_with_llm", lambda state: answer_questions_with_llm(state, llm))
         graph_builder.add_node("assess_target_text_suitability", lambda state: assess_target_text_suitability(state, llm))
         graph_builder.add_node("synthesize_conclusion", lambda state: synthesize_conclusion(state, llm))
+        
+        # Enhanced llm_knowledge route nodes
+        graph_builder.add_node("evaluate_conclusion_match", lambda state: evaluate_conclusion_match(state, llm))
+        graph_builder.add_node("generate_additional_questions", lambda state: generate_additional_questions(state, llm))
+        graph_builder.add_node("answer_additional_questions_with_llm", lambda state: answer_additional_questions_with_llm(state, llm))
 
         # Define edges
         # Conditional edge from START: route directly to assessment for target_text_suitability, otherwise to research plan
@@ -155,14 +186,35 @@ def build_graph(llm: BaseChatModel, retriever: Optional[ContextualCompressionRet
         graph_builder.add_edge("retrieve_documents", "synthesize_conclusion")
 
 
-        # Path 2: LLM Internal Knowledge
+        # Path 2: LLM Internal Knowledge (Enhanced with evaluation and feedback loop)
         graph_builder.add_edge("answer_questions_with_llm", "synthesize_conclusion")
+        
+        # Enhanced llm_knowledge route: evaluate conclusion after synthesis
+        graph_builder.add_conditional_edges(
+            "synthesize_conclusion",
+            lambda state: "evaluate_conclusion_match" if state.get("synthesis_input_source") == "llm_knowledge" else "end",
+            {
+                "evaluate_conclusion_match": "evaluate_conclusion_match",
+                "end": END
+            }
+        )
+        
+        # Route based on evaluation score and iteration status
+        graph_builder.add_conditional_edges(
+            "evaluate_conclusion_match",
+            decide_evaluation_path,
+            {
+                "generate_additional_questions": "generate_additional_questions",
+                "end": END
+            }
+        )
+        
+        # Feedback loop for additional questions
+        graph_builder.add_edge("generate_additional_questions", "answer_additional_questions_with_llm")
+        graph_builder.add_edge("answer_additional_questions_with_llm", "synthesize_conclusion")
 
         # Path 3: Target Text Suitability Assessment
         graph_builder.add_edge("assess_target_text_suitability", END)
-
-        # Final step
-        graph_builder.add_edge("synthesize_conclusion", END)
 
         # Compile the graph
         logging.info("Compiling the LangGraph...")
